@@ -1,0 +1,8 @@
+[submodule "third_part/spdlog"]
+	path = third_part/spdlog
+	url = https://github.com/gabime/spdlog.git
+	branch = v1.x
+[submodule "third_part/googletest"]
+	path = third_part/googletest
+	url = https://github.com/google/googletest.git
+	branch = main
