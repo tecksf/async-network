@@ -8,19 +8,33 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_subdirectory(third_part/spdlog)
 add_subdirectory(third_part/googletest)
 
+add_compile_options(-fcoroutines)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBURING REQUIRED liburing)
+
+message(STATUS "LIBURING_INCLUDE_DIRS: ${LIBURING_INCLUDE_DIRS}")
+message(STATUS "LIBURING_LIBDIR: ${LIBURING_LIBDIR}")
+message(STATUS "LIBURING_LIBRARIES: ${LIBURING_LIBRARIES}")
+
 include_directories(
     src
     src/net
     include
+    ${LIBURING_INCLUDE_DIRS}
 )
 
-file(GLOB_RECURSE CORO_SOURCES src/async/*.cpp src/utils/*.cpp)
+file(GLOB_RECURSE CORO_SOURCES src/async/*.cpp src/net/*.cpp src/utils/*.cpp)
 add_library(coro STATIC ${CORO_SOURCES})
-target_link_libraries(coro PUBLIC pthread spdlog::spdlog)
+target_link_libraries(coro PUBLIC pthread spdlog::spdlog ${LIBURING_LIBRARIES})
 
 add_executable(async_network main.cpp)
 target_link_libraries(async_network PRIVATE coro)
-
+set_target_properties(async_network PROPERTIES
+    BUILD_RPATH "${LIBURING_LIBDIR}"
+    BUILD_RPATH_USE_ORIGIN ON
+    INSTALL_RPATH "${LIBURING_LIBDIR}"
+)
 
 #=========================== UT ============================
 

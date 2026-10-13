@@ -1,15 +1,25 @@
 #include "runtime.h"
 #include <utils/log.h>
+#include <unistd.h>
+#include <atomic>
 
 namespace coro {
 
 static thread_local Runtime* CurrentRuntime;
+
+static uint16_t generate_fanout_id()
+{
+    static std::atomic<uint16_t> sequence{0};
+    auto n = sequence.fetch_add(1, std::memory_order_relaxed);
+    return static_cast<uint16_t>(((::getpid() & 0xFF) << 8) ^ (n & 0xFF));
+}
 
 class Runtime::Impl {
 public:
     std::vector<std::shared_ptr<Polling>> polling;
     std::vector<std::jthread> workers;
     std::atomic<size_t> next_worker{0};
+    uint16_t fanout_id{0};
     std::shared_ptr<spdlog::logger> logger;
 };
 
@@ -31,6 +41,8 @@ Runtime::Runtime(int num_workers, std::shared_ptr<spdlog::logger> log)
 
     impl->polling.reserve(num_workers);
     impl->workers.reserve(num_workers);
+    impl->fanout_id = generate_fanout_id();
+    impl->logger->info("[Runtime] packet fanout id: {}", impl->fanout_id);
     start();
 }
 
@@ -57,7 +69,7 @@ void Runtime::start()
     auto num_workers = impl->polling.capacity();
     for (size_t i = 0; i < num_workers; ++i)
     {
-        auto polling = std::make_shared<Polling>(impl->logger);
+        auto polling = std::make_shared<Polling>(impl->logger, impl->fanout_id);
         impl->polling.push_back(polling);
     }
 
@@ -88,6 +100,16 @@ void Runtime::stop() const
     {
         p.join();
     }
+}
+
+size_t Runtime::workers() const
+{
+    return impl->polling.size();
+}
+
+uint16_t Runtime::packet_fanout_id() const
+{
+    return impl->fanout_id;
 }
 
 }

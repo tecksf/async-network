@@ -37,6 +37,8 @@ public:
     void spawn(std::coroutine_handle<> h) override;
     void start();
     void stop() const;
+    [[nodiscard]] size_t workers() const;
+    [[nodiscard]] uint16_t packet_fanout_id() const;
 
 private:
     class Impl;

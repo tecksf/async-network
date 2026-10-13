@@ -9,6 +9,8 @@
 #include <queue>
 #include <mutex>
 #include <memory>
+#include <span>
+#include <cstddef>
 #include "timer.h"
 
 namespace coro {
@@ -17,6 +19,7 @@ enum class PollType {
     Socket,
     Event,
     Timer,
+    Packet,
 };
 
 struct PollContext {
@@ -29,8 +32,9 @@ struct PollContext {
 class Polling {
 public:
     static constexpr unsigned RingEntries = 1024;
+    static Polling* current() noexcept;
 
-    explicit Polling(std::shared_ptr<spdlog::logger> log);
+    explicit Polling(std::shared_ptr<spdlog::logger> log, uint16_t fanout_id = 0);
     ~Polling();
 
     Polling(const Polling&) = delete;
@@ -57,8 +61,16 @@ private:
         std::vector<std::shared_ptr<Timer>>,
         Timer::Less> timers;
 
+    uint16_t fanout_id{0};
+    int packet_fd{-1};
+    PollContext packet_ctx;
+    std::coroutine_handle<> packet_waiter{nullptr};
+
     void init();
+    void open_capture();
     void register_wakener();
+    void register_packet_poll();
+    int read_packet(std::span<std::byte> buffer) const;
     bool implement_ready_tasks();
     uint64_t drain_prepare_tasks();
     uint64_t drain_due_timers();

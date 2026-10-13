@@ -1,13 +1,24 @@
 #include "polling.h"
+#include "capture.h"
 #include <sys/eventfd.h>
 #include <sys/poll.h>
+#include <sys/socket.h>
+#include <linux/if_packet.h>
+#include <net/if.h>
+#include <cerrno>
 
 namespace coro {
 
 thread_local Polling* LocalPolling = nullptr;
 
-Polling::Polling(std::shared_ptr<spdlog::logger> log)
-    : logger(log)
+Polling* Polling::current() noexcept
+{
+    return LocalPolling;
+}
+
+Polling::Polling(std::shared_ptr<spdlog::logger> log, uint16_t fanout)
+    : logger(log),
+      fanout_id(fanout)
 {
     init();
 }
@@ -18,6 +29,12 @@ Polling::~Polling()
     {
         close(wakener.fd);
         wakener.fd = -1;
+    }
+
+    if (packet_fd >= 0)
+    {
+        close(packet_fd);
+        packet_fd = -1;
     }
     io_uring_queue_exit(ring());
 }
@@ -42,13 +59,37 @@ void Polling::init()
         io_uring_queue_exit(ring());
         throw std::system_error(errno, std::generic_category(), "eventfd creation failed");
     }
+
+    open_capture();
+}
+
+void Polling::open_capture()
+{
+    packet_ctx.type = PollType::Packet;
+    packet_ctx.fd = -1;
+
+    int ifindex = if_nametoindex("eth0");
+
+    packet_fd = net::open_capture_socket(fanout_id, ifindex);
+    if (packet_fd < 0)
+    {
+        logger->warn("[Polling] AF_PACKET capture unavailable: {}", std::strerror(-packet_fd));
+        packet_fd = -1;
+        return;
+    }
+
+    packet_ctx.fd = packet_fd;
+    register_packet_poll();
+
+    logger->info("[Polling] packet capture fd {} (fanout id {}, ifindex {})", packet_fd, fanout_id, ifindex);
 }
 
 void Polling::run(std::stop_token stoken)
 {
-    LocalPolling = this;
-
     logger->info("[Polling] worker {} started", reinterpret_cast<uint64_t>(this));
+
+    LocalPolling = this;
+    register_wakener();
 
     while (not stoken.stop_requested())
     {
@@ -81,9 +122,7 @@ void Polling::stop() const
 
 void Polling::spawn(std::coroutine_handle<> h)
 {
-    if (!h) return;
-
-    {
+    if (!h) return; {
         std::lock_guard lock(task_mutex);
         prepare_tasks.push_back(h);
     }
@@ -102,6 +141,46 @@ void Polling::register_wakener()
 
     io_uring_prep_poll_add(sqe, wakener.fd, POLLIN);
     io_uring_sqe_set_data(sqe, &wakener);
+}
+
+void Polling::register_packet_poll()
+{
+    struct io_uring_sqe* sqe = io_uring_get_sqe(ring());
+    if (!sqe)
+    {
+        logger->error("[Polling] Failed to get SQE for packet poll");
+        return;
+    }
+
+    io_uring_prep_poll_add(sqe, packet_fd, POLLIN);
+    io_uring_sqe_set_data(sqe, &packet_ctx);
+}
+
+int Polling::read_packet(std::span<std::byte> buffer) const
+{
+    struct sockaddr_ll sll{};
+    socklen_t sll_len = sizeof(sll);
+    ssize_t n = ::recvfrom(packet_fd, buffer.data(), buffer.size(), MSG_DONTWAIT,
+                           reinterpret_cast<struct sockaddr*>(&sll), &sll_len);
+    if (n > 0)
+    {
+        // if (sll.sll_pkttype == PACKET_OUTGOING)
+        // {
+        //     return 0;
+        // }
+        return static_cast<int>(n);
+    }
+    if (n == 0)
+    {
+        return 0;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+    {
+        return 0;
+    }
+
+    logger->warn("[Polling] packet recv error: {}", std::strerror(errno));
+    return -errno;
 }
 
 bool Polling::implement_ready_tasks()
@@ -166,6 +245,15 @@ void Polling::handle_one_entry(struct io_uring_cqe* cqe)
     {
         register_wakener();
         drain_prepare_tasks();
+    }
+    else if (context->type == PollType::Packet)
+    {
+        std::array<std::byte, 65536> buffer{};
+        if (int n = read_packet(buffer); n > 0)
+        {
+            logger->info("[Polling] receive {} bytes data", n);
+        }
+        register_packet_poll();
     }
     else if (context->type == PollType::Socket || context->type == PollType::Timer)
     {
