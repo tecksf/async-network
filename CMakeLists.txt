@@ -28,8 +28,12 @@ file(GLOB_RECURSE CORO_SOURCES src/async/*.cpp src/net/*.cpp src/utils/*.cpp)
 add_library(coro STATIC ${CORO_SOURCES})
 target_link_libraries(coro PUBLIC pthread spdlog::spdlog ${LIBURING_LIBRARIES})
 
+file(GLOB_RECURSE NET_SOURCES src/net/*.cpp src/utils/*.cpp)
+add_library(net STATIC ${NET_SOURCES})
+target_link_libraries(net PUBLIC spdlog::spdlog)
+
 add_executable(async_network main.cpp)
-target_link_libraries(async_network PRIVATE coro)
+target_link_libraries(async_network PRIVATE coro net)
 set_target_properties(async_network PROPERTIES
     BUILD_RPATH "${LIBURING_LIBDIR}"
     BUILD_RPATH_USE_ORIGIN ON
@@ -41,6 +45,8 @@ set_target_properties(async_network PROPERTIES
 file(GLOB_RECURSE UT_SOURCES tests/*.cpp)
 add_executable(async_network_ut ${UT_SOURCES})
 target_link_libraries(async_network_ut PRIVATE
+    net
+    coro
     gtest
     gmock
     gtest_main
