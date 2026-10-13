@@ -3,6 +3,7 @@
 
 #include "encoding.h"
 #include <string>
+#include <array>
 
 namespace coro::net {
 
@@ -22,7 +23,9 @@ public:
 
     bool is_multicast() const;
     bool is_broadcast() const;
+    bool is_null() const;
 
+    std::array<uint8_t, 6> as_bytes() const;
     operator std::string() const;
     std::string to_string() const;
     uint64_t to_u64() const;

@@ -23,6 +23,7 @@ public:
     bool is_multicast() const;
     bool is_loopback() const;
 
+    std::array<uint8_t, 4> as_bytes() const;
     operator std::string() const;
     std::string to_string() const;
     uint32_t to_u32() const;

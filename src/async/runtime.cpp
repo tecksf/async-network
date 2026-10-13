@@ -2,6 +2,7 @@
 #include <utils/log.h>
 #include <unistd.h>
 #include <atomic>
+#include <protocol/network_controller.h>
 
 namespace coro {
 
@@ -21,6 +22,7 @@ public:
     std::atomic<size_t> next_worker{0};
     uint16_t fanout_id{0};
     std::shared_ptr<spdlog::logger> logger;
+    std::shared_ptr<net::NetworkController> controller;
 };
 
 Runtime::Runtime(int num_workers, std::shared_ptr<spdlog::logger> log)
@@ -43,6 +45,9 @@ Runtime::Runtime(int num_workers, std::shared_ptr<spdlog::logger> log)
     impl->workers.reserve(num_workers);
     impl->fanout_id = generate_fanout_id();
     impl->logger->info("[Runtime] packet fanout id: {}", impl->fanout_id);
+
+    impl->controller = std::make_shared<net::NetworkController>(impl->logger);
+
     start();
 }
 
@@ -70,6 +75,7 @@ void Runtime::start()
     for (size_t i = 0; i < num_workers; ++i)
     {
         auto polling = std::make_shared<Polling>(impl->logger, impl->fanout_id);
+        polling->set_network_interface(impl->controller);
         impl->polling.push_back(polling);
     }
 

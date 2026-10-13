@@ -9,9 +9,8 @@
 #include <queue>
 #include <mutex>
 #include <memory>
-#include <span>
-#include <cstddef>
 #include "timer.h"
+#include <net/network_interface.h>
 
 namespace coro {
 
@@ -42,6 +41,7 @@ public:
     Polling(Polling&&) = delete;
     Polling& operator=(Polling&&) = delete;
     struct io_uring* ring() noexcept;
+    void set_network_interface(std::shared_ptr<net::NetworkInterface> interface);
 
     void run(std::stop_token stoken);
     void stop() const;
@@ -62,15 +62,14 @@ private:
         Timer::Less> timers;
 
     uint16_t fanout_id{0};
-    int packet_fd{-1};
     PollContext packet_ctx;
-    std::coroutine_handle<> packet_waiter{nullptr};
+
+    std::shared_ptr<net::NetworkInterface> network_interface;
 
     void init();
     void open_capture();
     void register_wakener();
     void register_packet_poll();
-    int read_packet(std::span<std::byte> buffer) const;
     bool implement_ready_tasks();
     uint64_t drain_prepare_tasks();
     uint64_t drain_due_timers();

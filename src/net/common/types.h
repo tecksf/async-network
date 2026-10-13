@@ -13,6 +13,14 @@ enum class Protocol {
     UDP = 0x0011,
 };
 
+constexpr int MAX_BLOCK_SIZE = 1536;
+constexpr int ETHERNET_HEADER_SIZE = 14;
+constexpr int IPv4_HEADER_SIZE = 20;
+constexpr int TCP_HEADER_SIZE = 20;
+constexpr int UDP_HEADER_SIZE = 8;
+constexpr int ICMP_HEADER_SIZE = 4;
+constexpr int ARP_HEADER_SIZE = 28;
+
 }
 
 #endif //ASYNC_NETWORK_TYPES_H

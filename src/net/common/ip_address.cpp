@@ -88,6 +88,11 @@ bool IpAddress::is_loopback() const
     return s1 == 127 && s2 == 0 && s3 == 0 && s4 == 1;
 }
 
+std::array<uint8_t, 4> IpAddress::as_bytes() const
+{
+    return std::array{s1, s2, s3, s4};
+}
+
 IpAddress::operator std::string() const
 {
     return to_string();

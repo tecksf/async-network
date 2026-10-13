@@ -104,6 +104,16 @@ bool MacAddress::is_broadcast() const
            s4 == 0xFF && s5 == 0xFF && s6 == 0xFF;
 }
 
+bool MacAddress::is_null() const
+{
+    return (s1 | s2 | s3 | s4 | s5 | s6) == 0;
+}
+
+std::array<uint8_t, 6> MacAddress::as_bytes() const
+{
+    return std::array{s1, s2, s3, s4, s5, s6};
+}
+
 MacAddress::operator std::string() const
 {
     return to_string();
