@@ -31,6 +31,7 @@ public:
     void set_host_ip(const IpAddress& ip);
     void set_host_mac(const MacAddress& mac);
     bool register_user_socket_operation(Protocol protocol, UserSocketContext* ctx) override;
+    void emit_close_socket_event(Protocol protocol, int fd) override;
     int open_capture_socket(uint16_t fanout_id, int ifindex = -1) override;
     std::coroutine_handle<> make_task_for_socket_packet(int fd) override;
     void update_address_mapping(const IpAddress& ip, const MacAddress& mac) override;

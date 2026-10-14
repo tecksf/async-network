@@ -108,6 +108,8 @@ void Polling::run(std::stop_token stoken)
         }
     }
 
+    implement_ready_tasks();
+
     logger->info("[Polling] worker {} stopped", reinterpret_cast<uint64_t>(this));
 }
 

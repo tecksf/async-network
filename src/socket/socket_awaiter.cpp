@@ -19,13 +19,12 @@ CloseAwaiter::CloseAwaiter(std::shared_ptr<SocketRegistry> network, int fd, Prot
 
 bool CloseAwaiter::await_ready() const noexcept
 {
-    return false;
+    return context.fd < 0;
 }
 
 bool CloseAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 {
     context.handle = h;
-    context.result = 0;
     bool done = network_stack->register_user_socket_operation(static_cast<Protocol>(context.result), &context);
     return not done;
 }

@@ -201,6 +201,14 @@ bool NetworkController::register_user_socket_operation(Protocol protocol, UserSo
     return false;
 }
 
+void NetworkController::emit_close_socket_event(Protocol protocol, int fd)
+{
+    UserSocketContext context;
+    context.operation = SocketOperation::Close;
+    context.fd = fd;
+    register_user_socket_operation(protocol, &context);
+}
+
 std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
 {
     Block* block = inbound_buffer.allocate();

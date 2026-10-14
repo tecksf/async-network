@@ -24,7 +24,7 @@ static co_async<> start_udp_connection(std::shared_ptr<spdlog::logger> logger, s
     buffer.resize(4096);
     std::span data(buffer);
 
-    auto socket = binder.value();
+    auto socket = std::move(binder.value());
     while (true)
     {
         auto result = co_await socket.receive_from(data);
@@ -39,6 +39,13 @@ static co_async<> start_udp_connection(std::shared_ptr<spdlog::logger> logger, s
         std::string text(data.begin(), data.begin() + count);
         spdlog::info("Received {} bytes from {} ==> {}", count, std::string(client), text);
         co_await socket.send_to(text, client);
+
+        if (text == "quit")
+        {
+            co_await socket.send_to("bye!", client);
+            co_await socket.close();
+            break;
+        }
     }
 }
 
@@ -67,7 +74,7 @@ int main(int argc, char* argv[])
 
     auto logger = utils::create_async_logger("runtime");
 
-    coro::Runtime runtime(1, logger);
+    coro::Runtime runtime(4, logger);
     runtime.start_network(nic_interface, network_address);
     runtime.block_on(co_main(logger, network_address));
 

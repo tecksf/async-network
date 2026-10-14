@@ -150,6 +150,20 @@ bool UdpManager::handle_user_socket_operation(UserSocketContext* ctx)
             app->sumit_task(async_send_udp_segment(outbounds, context));
         }
     }
+    else if (ctx->operation == SocketOperation::Close)
+    {
+        auto it = sockets.find(ctx->fd);
+        if (it != sockets.end())
+        {
+            sockets.erase(it);
+            socket_queue.erase(UdpSocketHandle(inet->get_host_ip(), it->second->local_port));
+            ctx->result = 0;
+        }
+        else
+        {
+            ctx->result = -EBADF;
+        }
+    }
 
     return done;
 }

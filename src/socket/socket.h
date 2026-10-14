@@ -39,6 +39,7 @@ protected:
 class SocketRegistry {
 public:
     virtual bool register_user_socket_operation(Protocol protocol, UserSocketContext* ctx) = 0;
+    virtual void emit_close_socket_event(Protocol protocol, int fd) = 0;
 };
 
 }
