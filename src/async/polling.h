@@ -47,6 +47,7 @@ public:
     void stop() const;
     void spawn(std::coroutine_handle<> h);
     void spawn_local(std::coroutine_handle<> h);
+    TimerControl spawn_timer(std::chrono::steady_clock::time_point deadline, std::coroutine_handle<> h);
 
 private:
     std::shared_ptr<spdlog::logger> logger;
@@ -60,7 +61,7 @@ private:
     std::priority_queue<
         std::shared_ptr<Timer>,
         std::vector<std::shared_ptr<Timer>>,
-        Timer::Less> timers;
+        Timer::Later> timers;
 
     uint16_t fanout_id{0};
     PollContext packet_ctx;

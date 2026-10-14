@@ -21,10 +21,10 @@ public:
     std::coroutine_handle<> release_handle();
     std::chrono::steady_clock::time_point get_deadline() const;
 
-    struct Less {
-        bool operator()(std::shared_ptr<Timer> t1, std::shared_ptr<Timer> t2) const
+    struct Later {
+        bool operator()(const std::shared_ptr<Timer>& t1, const std::shared_ptr<Timer>& t2) const
         {
-            return t1->get_deadline() < t2->get_deadline();
+            return t1->get_deadline() > t2->get_deadline();
         }
     };
 
@@ -55,6 +55,17 @@ public:
 
 private:
     std::shared_ptr<std::atomic<bool>> cancelled;
+};
+
+struct SleepAwaiter {
+    explicit SleepAwaiter(const std::chrono::steady_clock::time_point& deadline);
+    bool await_ready() noexcept;
+    void await_suspend(std::coroutine_handle<> h) noexcept;
+    TimerControl await_resume() const noexcept;
+
+private:
+    std::chrono::steady_clock::time_point deadline;
+    TimerControl control;
 };
 
 }

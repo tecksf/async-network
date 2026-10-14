@@ -1,4 +1,5 @@
 #include "timer.h"
+#include "polling.h"
 
 namespace coro {
 
@@ -42,6 +43,28 @@ std::coroutine_handle<> Timer::release_handle()
 std::chrono::steady_clock::time_point Timer::get_deadline() const
 {
     return deadline;
+}
+
+SleepAwaiter::SleepAwaiter(const std::chrono::steady_clock::time_point& deadline)
+    : deadline(deadline),
+      control(nullptr)
+{
+}
+
+bool SleepAwaiter::await_ready() noexcept
+{
+    return false;
+}
+
+void SleepAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    auto local_polling = Polling::current();
+    control = local_polling->spawn_timer(deadline, h);
+}
+
+TimerControl SleepAwaiter::await_resume() const noexcept
+{
+    return control;
 }
 
 }

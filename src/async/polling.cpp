@@ -131,6 +131,13 @@ void Polling::spawn_local(std::coroutine_handle<> h)
     ready_tasks.push_back(h);
 }
 
+TimerControl Polling::spawn_timer(std::chrono::steady_clock::time_point deadline, std::coroutine_handle<> h)
+{
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
+    timers.emplace(std::make_shared<Timer>(deadline, h, cancelled));
+    return TimerControl(cancelled);
+}
+
 void Polling::register_wakener()
 {
     struct io_uring_sqe* sqe = io_uring_get_sqe(ring());
