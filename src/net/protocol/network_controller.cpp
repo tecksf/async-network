@@ -4,6 +4,7 @@
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cerrno>
@@ -33,6 +34,26 @@ static void notify_waiters(const std::vector<std::coroutine_handle<>>& waiters)
     }
 }
 
+static bool get_mac_by_ifname(const std::string& ifname, uint8_t mac[6])
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return false;
+
+    struct ifreq ifr{};
+    std::strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0)
+    {
+        close(fd);
+        return false;
+    }
+    close(fd);
+
+    std::memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
+    return true;
+}
+
 NetworkController::NetworkController(std::shared_ptr<spdlog::logger> logger)
     : logger(logger)
 {
@@ -42,6 +63,23 @@ NetworkController::NetworkController(std::shared_ptr<spdlog::logger> logger)
 
 NetworkController::~NetworkController()
 {
+}
+
+void NetworkController::set_interface_name(const std::string& name)
+{
+    interface_name = name;
+
+    uint8_t mac[6];
+    if (get_mac_by_ifname(interface_name, mac))
+    {
+        host_mac = MacAddress(std::span(mac));
+        logger->info("detect interface {} mac is {}", interface_name, host_mac.to_string());
+    }
+}
+
+std::string NetworkController::get_interface_name() const
+{
+    return interface_name;
 }
 
 void NetworkController::deliver_message(uint8_t* frame, size_t length)

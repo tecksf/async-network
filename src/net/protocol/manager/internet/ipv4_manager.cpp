@@ -111,8 +111,8 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const SocketBuffer& outbound, con
     packet.set_destination_ip(ctx.destination);
     packet.seal();
 
-    logger->info("send IP packet: destination ip={}, identification={}, fragment offset={}",
-                 std::string(ctx.destination), packet.get_identification(), packet.get_fragment_offset());
+    // logger->info("send IP packet: destination ip={}, identification={}, fragment offset={}",
+    //              std::string(ctx.destination), packet.get_identification(), packet.get_fragment_offset());
 
     co_await link->async_send_ethernet_frame(outbound, context);
 }

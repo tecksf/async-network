@@ -63,6 +63,19 @@ Runtime*& Runtime::current()
     return CurrentRuntime;
 }
 
+void Runtime::config_network(const std::string& interface_name, const std::string& ip) const
+{
+    impl->controller->set_interface_name(interface_name);
+    if (auto address = net::IpAddress::from(ip))
+    {
+        impl->controller->set_host_ip(address.value());
+    }
+    else
+    {
+        impl->logger->warn("[Runtime] invalid ip address {}", ip);
+    }
+}
+
 void Runtime::spawn(std::coroutine_handle<> h)
 {
     size_t index = impl->next_worker.fetch_add(1, std::memory_order_relaxed) % impl->polling.size();

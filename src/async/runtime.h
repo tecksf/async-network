@@ -18,6 +18,7 @@ public:
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     static Runtime*& current();
+    void config_network(const std::string& interface_name, const std::string& ip) const;
 
     template<typename T>
     void block_on(AsyncTask<T>&& task)

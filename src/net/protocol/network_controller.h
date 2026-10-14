@@ -21,6 +21,8 @@ public:
     NetworkController(std::shared_ptr<spdlog::logger> logger);
     ~NetworkController() override;
     void deliver_message(uint8_t*, size_t) override;
+    void set_interface_name(const std::string& name);
+    std::string get_interface_name() const override;
     MacAddress get_host_mac() const override;
     IpAddress get_host_ip() const override;
     void set_host_ip(const IpAddress& ip);
@@ -46,7 +48,7 @@ private:
 
     int capture_fd = -1;
     int interface_index = -1;
-    std::string interface_name;
+    std::string interface_name="eth0";
 
     std::shared_ptr<spdlog::logger> logger;
 

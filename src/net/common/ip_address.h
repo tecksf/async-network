@@ -3,6 +3,7 @@
 
 #include "encoding.h"
 #include <string>
+#include <optional>
 
 namespace coro::net {
 
@@ -19,6 +20,8 @@ public:
     bool operator!=(const IpAddress& ip) const;
     bool operator<(const IpAddress& ip) const;
     ~IpAddress();
+
+    static std::optional<IpAddress> from(const std::string& text);
 
     bool is_multicast() const;
     bool is_loopback() const;

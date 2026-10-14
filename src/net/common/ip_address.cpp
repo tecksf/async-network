@@ -75,7 +75,41 @@ bool IpAddress::operator<(const IpAddress& ip) const
     return this->to_u32() < ip.to_u32();
 }
 
-IpAddress::~IpAddress() {
+IpAddress::~IpAddress()
+{
+}
+
+std::optional<IpAddress> IpAddress::from(const std::string& text)
+{
+    uint32_t ip = 0;
+    const char* start = text.data();
+    const char* finish = text.data() + text.size();
+
+    int result = 0;
+    for (int i = 0; i < 4; ++i)
+    {
+        auto [ptr, ec] = std::from_chars(start, finish, result);
+        if (ec != std::errc{} || result < 0 || result > 255)
+        {
+            return std::nullopt;
+        }
+
+        start = ptr;
+        if (i < 3 && *start != '.')
+        {
+            return std::nullopt;
+        }
+
+        ip = ip << 8 | result;
+        ++start;
+    }
+
+    if (--start != finish)
+    {
+        return std::nullopt;
+    }
+
+    return IpAddress(ip);
 }
 
 bool IpAddress::is_multicast() const
