@@ -4,6 +4,7 @@
 #include <async/task.hpp>
 #include <async/runtime.h>
 #include <async/timer.h>
+#include <async/wait_group.h>
 
 namespace coro {
 
