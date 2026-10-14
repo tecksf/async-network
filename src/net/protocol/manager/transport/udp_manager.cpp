@@ -214,7 +214,7 @@ std::vector<SocketBuffer> UdpManager::copy_user_data_to_buffer(std::span<uint8_t
         rest = rest.subspan(len);
 
         auto outbound = app->allocate_socket_buffer();
-        outbound->consume(MAX_BLOCK_SIZE - data.size());
+        outbound->allocate(data.size());
         std::ranges::copy(data, outbound->begin());
         outbounds.push_back(outbound);
     };

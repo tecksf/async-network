@@ -55,7 +55,6 @@ private:
     RingBuffer<Block, 128> inbound_buffer;
     RingBuffer<Block, 128> outbound_buffer;
 
-    // capture fd 由每个 Polling 线程独立持有（见 Polling::packet_fd()），此处不再共享保存。
     std::atomic<int> interface_index{-1};
     std::string interface_name = "eth0";
 

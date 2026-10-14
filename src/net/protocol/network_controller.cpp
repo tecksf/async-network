@@ -294,7 +294,7 @@ SocketBuffer NetworkController::allocate_socket_buffer()
     };
 
     SocketBuffer outbound(
-        std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), MAX_BLOCK_SIZE, MAX_BLOCK_SIZE, recycle)
+        std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), MAX_BLOCK_SIZE, std::nullopt, recycle)
     );
     return outbound;
 }
