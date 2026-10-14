@@ -42,6 +42,7 @@ public:
     Polling& operator=(Polling&&) = delete;
     struct io_uring* ring() noexcept;
     void set_network_interface(std::shared_ptr<net::NetworkInterface> interface);
+    int packet_fd() const noexcept;
 
     void run(std::stop_token stoken);
     void stop() const;

@@ -46,6 +46,11 @@ void Polling::set_network_interface(std::shared_ptr<net::NetworkInterface> inter
     open_capture();
 }
 
+int Polling::packet_fd() const noexcept
+{
+    return packet_ctx.fd;
+}
+
 void Polling::init()
 {
     int res = io_uring_queue_init(RingEntries, ring(), 0);

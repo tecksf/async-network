@@ -91,14 +91,23 @@ std::string NetworkController::get_interface_name() const
 
 void NetworkController::deliver_message(uint8_t* frame, size_t length)
 {
-    if (capture_fd < 0 or frame == nullptr or length < ETHERNET_HEADER_SIZE)
+    if (frame == nullptr or length < ETHERNET_HEADER_SIZE)
     {
+        return;
+    }
+
+    Polling* polling = Polling::current();
+    const int capture_fd = polling != nullptr ? polling->packet_fd() : -1;
+    const int ifindex = interface_index.load(std::memory_order_relaxed);
+    if (capture_fd < 0 or ifindex <= 0)
+    {
+        logger->error("no capture socket bound to current thread (fd={}, ifindex={}), drop frame", capture_fd, ifindex);
         return;
     }
 
     struct sockaddr_ll addr = {};
     addr.sll_family = AF_PACKET;
-    addr.sll_ifindex = interface_index;
+    addr.sll_ifindex = ifindex;
     addr.sll_halen = static_cast<uint8_t>(ETH_ALEN);
     std::memcpy(addr.sll_addr, frame, ETH_ALEN);
     std::memcpy(&addr.sll_protocol, frame + 12, sizeof(addr.sll_protocol));
@@ -119,7 +128,7 @@ void NetworkController::deliver_message(uint8_t* frame, size_t length)
 
 int NetworkController::open_capture_socket(uint16_t fanout_id, int ifindex)
 {
-    capture_fd = ::socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, htons(ETH_P_ALL));
+    int capture_fd = ::socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, htons(ETH_P_ALL));
     if (capture_fd < 0)
     {
         return -errno;
@@ -135,17 +144,28 @@ int NetworkController::open_capture_socket(uint16_t fanout_id, int ifindex)
         return -err;
     }
 
-    interface_index = ifindex;
-    if (ifindex == -1)
+    int index = ifindex;
+    if (index == -1)
     {
-        interface_index = if_nametoindex(get_interface_name().c_str());
+        index = static_cast<int>(if_nametoindex(get_interface_name().c_str()));
     }
-    logger->info("interface: name={}, index={}", get_interface_name(), interface_index);
+
+    if (index == 0)
+    {
+        err = errno != 0 ? errno : ENODEV;
+        logger->error("resolve interface index failed, name={}, errno={} ({})", get_interface_name(), err, std::strerror(err));
+        ::close(capture_fd);
+        return -err;
+    }
+
+    int expected = -1;
+    interface_index.compare_exchange_strong(expected, index);
+    logger->info("interface: name={}, index={}", get_interface_name(), index);
 
     struct sockaddr_ll addr{};
     addr.sll_family = AF_PACKET;
     addr.sll_protocol = htons(ETH_P_ALL);
-    addr.sll_ifindex = interface_index;
+    addr.sll_ifindex = index;
     if (::bind(capture_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0)
     {
         err = errno;
