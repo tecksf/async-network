@@ -126,6 +126,11 @@ void Polling::spawn(std::coroutine_handle<> h)
     wakeup();
 }
 
+void Polling::spawn_local(std::coroutine_handle<> h)
+{
+    ready_tasks.push_back(h);
+}
+
 void Polling::register_wakener()
 {
     struct io_uring_sqe* sqe = io_uring_get_sqe(ring());

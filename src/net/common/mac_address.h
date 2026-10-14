@@ -30,6 +30,8 @@ public:
     std::string to_string() const;
     uint64_t to_u64() const;
 
+    static const MacAddress Broadcast;
+
 private:
     uint8_t s1;
     uint8_t s2;

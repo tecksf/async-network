@@ -46,6 +46,7 @@ public:
     void run(std::stop_token stoken);
     void stop() const;
     void spawn(std::coroutine_handle<> h);
+    void spawn_local(std::coroutine_handle<> h);
 
 private:
     std::shared_ptr<spdlog::logger> logger;

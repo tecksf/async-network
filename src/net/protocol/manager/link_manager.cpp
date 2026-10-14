@@ -4,19 +4,45 @@
 
 namespace coro::net::link {
 
-LinkManger::LinkManger(inet::InternetService* inet, LinkService* link, phy::PhysicalService* phy, std::shared_ptr<spdlog::logger> logger)
-    : inet(inet),
-      link(link),
-      phy(phy),
-      logger(logger)
+LinkManager::LinkManager(inet::InternetService* inet, LinkService* link, phy::PhysicalService* phy, std::shared_ptr<spdlog::logger> logger)
+    : inet(inet), link(link), phy(phy), logger(logger)
 {
 }
 
-LinkManger::~LinkManger()
+LinkManager::~LinkManager()
 {
 }
 
-co_async<> LinkManger::on_ethernet_frame_received(const SocketBuffer& inbound) const
+std::vector<std::coroutine_handle<>> LinkManager::update_address_mapping(const IpAddress& ip, const MacAddress& mac)
+{
+    std::lock_guard<std::mutex> lock(arp_table_mutex);
+    ArpEntry& entry = arp_table[ip];
+    entry.mac = mac;
+
+    std::vector<std::coroutine_handle<>> waiters;
+    if (not entry.waiters.empty())
+    {
+        waiters.swap(entry.waiters);
+        entry.waiters.clear();
+    }
+
+    return waiters;
+}
+
+std::optional<MacAddress> LinkManager::retrieve_mac_address(const IpAddress& ip, std::coroutine_handle<> waiter)
+{
+    std::lock_guard<std::mutex> lock(arp_table_mutex);
+    ArpEntry& entry = arp_table[ip];
+    if (entry.mac.has_value())
+    {
+        return entry.mac;
+    }
+
+    entry.waiters.push_back(waiter);
+    return std::nullopt;
+}
+
+co_async<> LinkManager::on_ethernet_frame_received(const SocketBuffer& inbound) const
 {
     const auto input = EthernetFrame::build(inbound->get_header_payload());
     if (!input.has_value())
@@ -35,7 +61,7 @@ co_async<> LinkManger::on_ethernet_frame_received(const SocketBuffer& inbound) c
         co_return;
     }
 
-    logger->debug("source mac={}, destination mac={}", frame.get_source_mac().to_string(), mac.to_string());
+    // logger->debug("source mac={}, destination mac={}", frame.get_source_mac().to_string(), mac.to_string());
 
     switch (frame.get_protocol())
     {
@@ -43,13 +69,14 @@ co_async<> LinkManger::on_ethernet_frame_received(const SocketBuffer& inbound) c
             co_await link->on_arp_packet_received(inbound);
             break;
         case Protocol::IPv4:
+            co_await inet->on_ipv4_packet_received(inbound);
             break;
         default:
             break;
     }
 }
 
-co_async<> LinkManger::async_send_ethernet_frame(const SocketBuffer& outbound, const EthernetContext& ctx) const
+co_async<> LinkManager::async_send_ethernet_frame(const SocketBuffer& outbound, const EthernetContext& ctx) const
 {
     if (outbound->size() > EthernetFrame::MTU)
     {
@@ -67,7 +94,7 @@ co_async<> LinkManger::async_send_ethernet_frame(const SocketBuffer& outbound, c
     co_return;
 }
 
-co_async<> LinkManger::on_arp_packet_received(const SocketBuffer& inbound) const
+co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound)
 {
     const auto input = ArpPacket::build(inbound->get_header_payload());
     if (!input.has_value())
@@ -85,6 +112,7 @@ co_async<> LinkManger::on_arp_packet_received(const SocketBuffer& inbound) const
 
     const IpAddress ip = packet.getSenderIpAddress();
     const MacAddress mac = packet.getSenderMacAddress();
+    link->update_address_mapping(ip, mac);
 
     if (packet.notToReply() or packet.isResponse())
     {
@@ -94,17 +122,17 @@ co_async<> LinkManger::on_arp_packet_received(const SocketBuffer& inbound) const
 
     ArpContext context;
     context.protocol = Protocol::ARP;
-    context.operateCode = ArpPacket::ReplyOperation;
+    context.operate_code = ArpPacket::ReplyOperation;
     context.ip = ip;
     context.mac = mac;
 
     co_await async_send_arp_packet(inbound, context);
 }
 
-co_async<> LinkManger::async_send_arp_packet(const SocketBuffer& outbound, const ArpContext& ctx) const
+co_async<> LinkManager::async_send_arp_packet(const SocketBuffer& outbound, const ArpContext& ctx) const
 {
     ArpPacket packet(outbound->allocate(ArpPacket::HeaderSize), true);
-    packet.setOperateCode(ctx.operateCode);
+    packet.setOperateCode(ctx.operate_code);
     packet.setReceiverIpAddress(ctx.ip);
     packet.setReceiverMacAddress(ctx.mac);
     packet.setSenderMacAddress(link->get_host_mac());
@@ -115,6 +143,19 @@ co_async<> LinkManger::async_send_arp_packet(const SocketBuffer& outbound, const
     context.destination = ctx.mac;
 
     co_await link->async_send_ethernet_frame(outbound, context);
+}
+
+co_async<> LinkManager::async_send_arp_request_operation(IpAddress ip) const
+{
+    uint8_t data[64];
+    SocketBuffer outbound(std::make_shared<SocketBufferImpl>(data, 64, std::nullopt));
+    ArpContext context;
+    context.protocol = Protocol::ARP;
+    context.operate_code = ArpPacket::RequestOperation;
+    context.ip = ip;
+    context.mac = MacAddress::Broadcast;
+
+    co_await async_send_arp_packet(outbound, context);
 }
 
 }

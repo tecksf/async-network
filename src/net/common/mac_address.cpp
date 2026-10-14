@@ -3,6 +3,8 @@
 
 namespace coro::net {
 
+const MacAddress MacAddress::Broadcast{0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
 MacAddress::MacAddress()
 {
     s1 = 0;

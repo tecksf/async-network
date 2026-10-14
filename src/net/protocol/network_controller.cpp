@@ -1,4 +1,5 @@
 #include "network_controller.h"
+#include <async/polling.h>
 #include <sys/socket.h>
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
@@ -15,10 +16,28 @@
 
 namespace coro::net {
 
+template<typename T>
+static void spawn_local(AsyncTask<T>&& task)
+{
+    auto local_polling = Polling::current();
+    auto h = task.release_handle();
+    local_polling->spawn_local(std::coroutine_handle<>::from_address(h.address()));
+}
+
+static void notify_waiters(const std::vector<std::coroutine_handle<>>& waiters)
+{
+    auto local_polling = Polling::current();
+    for (auto& w: waiters)
+    {
+        local_polling->spawn_local(w);
+    }
+}
+
 NetworkController::NetworkController(std::shared_ptr<spdlog::logger> logger)
     : logger(logger)
 {
-    link_manager = std::make_unique<link::LinkManger>(this, this, this, logger);
+    link_manager = std::make_unique<link::LinkManager>(this, this, this, logger);
+    ipv4_manager = std::make_unique<inet::Ipv4Manager>(this, this, this, logger);
 }
 
 NetworkController::~NetworkController()
@@ -157,6 +176,29 @@ std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
     return nullptr;
 }
 
+void NetworkController::update_address_mapping(const IpAddress& ip, const MacAddress& mac)
+{
+    auto waiters = link_manager->update_address_mapping(ip, mac);
+    notify_waiters(waiters);
+}
+
+bool NetworkController::subscribe_mac_updating_event(LinkEventRegister::Context* ctx)
+{
+    if (auto mac = link_manager->retrieve_mac_address(ctx->ip, ctx->h))
+    {
+        ctx->mac = mac.value();
+        return true;
+    }
+
+    spawn_local(link_manager->async_send_arp_request_operation(ctx->ip));
+    return false;
+}
+
+link::RetrieveMacAwaiter NetworkController::retrieve_mac_address(const IpAddress& ip)
+{
+    return link::RetrieveMacAwaiter(this, ip);
+}
+
 co_async<> NetworkController::on_ethernet_frame_received(SocketBuffer inbound) const
 {
     co_await link_manager->on_ethernet_frame_received(inbound);
@@ -178,6 +220,21 @@ co_async<> NetworkController::async_send_ethernet_frame(const SocketBuffer& outb
 }
 
 co_async<> NetworkController::on_ipv4_packet_received(const SocketBuffer& inbound) const
+{
+    co_await ipv4_manager->on_ipv4_packet_received(inbound);
+}
+
+co_async<> NetworkController::async_send_ipv4_packet(SocketBuffer outbound, const inet::Ipv4Context ctx)
+{
+    co_await ipv4_manager->async_send_ipv4_packet(outbound, ctx);
+}
+
+co_async<> NetworkController::async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const trans::UdpContext ctx)
+{
+    co_return;
+}
+
+co_async<> NetworkController::on_udp_segment_received(const SocketBuffer& inbound, const trans::UdpContext& ctx)
 {
     co_return;
 }
