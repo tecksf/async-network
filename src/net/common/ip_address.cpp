@@ -1,4 +1,5 @@
 #include "ip_address.h"
+#include <charconv>
 #include <format>
 
 namespace coro::net {
@@ -79,7 +80,7 @@ IpAddress::~IpAddress()
 {
 }
 
-std::optional<IpAddress> IpAddress::from(const std::string& text)
+std::optional<IpAddress> IpAddress::from(std::string_view text)
 {
     uint32_t ip = 0;
     const char* start = text.data();
@@ -145,6 +146,67 @@ uint32_t IpAddress::to_u32() const
 bool IpAddress::in_same_network(const IpAddress& ip, const IpAddress& mask) const
 {
     return (this->to_u32() & mask.to_u32()) == (ip.to_u32() & mask.to_u32());
+}
+
+SocketAddress::SocketAddress()
+    : ip(0), port(0)
+{
+}
+
+SocketAddress::SocketAddress(const IpAddress& ip, uint16_t port)
+    : ip(ip), port(port)
+{
+}
+
+SocketAddress::operator std::string() const
+{
+    return std::format("{0}:{1}", ip.to_string(), port);
+}
+
+bool SocketAddress::operator==(const SocketAddress& address) const
+{
+    return ip == address.ip && port == address.port;
+}
+
+bool SocketAddress::operator<(const SocketAddress& address) const
+{
+    auto addr1 = static_cast<uint64_t>(ip.to_u32()) << 32 | port;
+    auto addr2 = static_cast<uint64_t>(address.ip.to_u32()) << 32 | address.port;
+
+    return addr1 < addr2;
+}
+
+std::optional<SocketAddress> SocketAddress::from(std::string_view text)
+{
+    uint16_t port = 0;
+    std::string_view ip_text = text;
+
+    auto colon = text.find(':');
+    if (colon != std::string_view::npos)
+    {
+        ip_text = text.substr(0, colon);
+        std::string_view port_text = text.substr(colon + 1);
+
+        if (!port_text.empty())
+        {
+            uint32_t value = 0;
+            auto [ptr, ec] = std::from_chars(port_text.data(), port_text.data() + port_text.size(), value);
+            if (ec != std::errc{} || ptr != port_text.data() + port_text.size() || value > 65535)
+            {
+                return std::nullopt;
+            }
+
+            port = static_cast<uint16_t>(value);
+        }
+    }
+
+    auto ip = IpAddress::from(ip_text);
+    if (!ip)
+    {
+        return std::nullopt;
+    }
+
+    return SocketAddress{*ip, port};
 }
 
 }

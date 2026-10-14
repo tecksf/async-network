@@ -21,7 +21,7 @@ public:
     bool operator<(const IpAddress& ip) const;
     ~IpAddress();
 
-    static std::optional<IpAddress> from(const std::string& text);
+    static std::optional<IpAddress> from(std::string_view text);
 
     bool is_multicast() const;
     bool is_loopback() const;
@@ -37,6 +37,21 @@ private:
     uint8_t s2;
     uint8_t s3;
     uint8_t s4;
+};
+
+
+struct SocketAddress {
+    IpAddress ip;
+    uint16_t port;
+
+    SocketAddress();
+    SocketAddress(const IpAddress& ip, uint16_t port);
+    ~SocketAddress() = default;
+
+    operator std::string() const;
+    bool operator==(const SocketAddress& address) const;
+    bool operator<(const SocketAddress& address) const;
+    static std::optional<SocketAddress> from(std::string_view text);
 };
 
 }

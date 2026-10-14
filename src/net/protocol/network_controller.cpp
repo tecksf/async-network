@@ -25,6 +25,12 @@ static void spawn_local(AsyncTask<T>&& task)
     local_polling->spawn_local(std::coroutine_handle<>::from_address(h.address()));
 }
 
+static void spawn_local(std::coroutine_handle<> h)
+{
+    auto local_polling = Polling::current();
+    local_polling->spawn_local(h);
+}
+
 static void notify_waiters(const std::vector<std::coroutine_handle<>>& waiters)
 {
     auto local_polling = Polling::current();
@@ -59,6 +65,7 @@ NetworkController::NetworkController(std::shared_ptr<spdlog::logger> logger)
 {
     link_manager = std::make_unique<link::LinkManager>(this, this, this, logger);
     ipv4_manager = std::make_unique<inet::Ipv4Manager>(this, this, this, logger);
+    udp_manager = std::make_unique<trans::UdpManager>(this, this, this, logger);
 }
 
 NetworkController::~NetworkController()
@@ -181,6 +188,19 @@ void NetworkController::set_host_mac(const MacAddress& mac)
     host_mac = mac;
 }
 
+bool NetworkController::register_user_socket_operation(Protocol protocol, UserSocketContext* ctx)
+{
+    if (protocol == Protocol::TCP)
+    {
+    }
+    else if (protocol == Protocol::UDP)
+    {
+        return udp_manager->handle_user_socket_operation(ctx);
+    }
+
+    return false;
+}
+
 std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
 {
     Block* block = inbound_buffer.allocate();
@@ -232,6 +252,30 @@ bool NetworkController::subscribe_mac_updating_event(LinkEventRegister::Context*
     return false;
 }
 
+int NetworkController::allocate_fd()
+{
+    int fd = fd_counter.fetch_add(1);
+    return fd;
+}
+
+SocketBuffer NetworkController::allocate_socket_buffer()
+{
+    Block* block = outbound_buffer.allocate();
+    auto recycle = [pool = &outbound_buffer](const void* ptr) {
+        pool->deallocate(static_cast<const Block*>(ptr));
+    };
+
+    SocketBuffer outbound(
+        std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), MAX_BLOCK_SIZE, MAX_BLOCK_SIZE, recycle)
+    );
+    return outbound;
+}
+
+void NetworkController::sumit_task(std::coroutine_handle<> h)
+{
+    spawn_local(h);
+}
+
 link::RetrieveMacAwaiter NetworkController::retrieve_mac_address(const IpAddress& ip)
 {
     return link::RetrieveMacAwaiter(this, ip);
@@ -262,19 +306,24 @@ co_async<> NetworkController::on_ipv4_packet_received(const SocketBuffer& inboun
     co_await ipv4_manager->on_ipv4_packet_received(inbound);
 }
 
-co_async<> NetworkController::async_send_ipv4_packet(SocketBuffer outbound, const inet::Ipv4Context ctx)
+co_async<> NetworkController::async_send_ipv4_packet(const SocketBuffer outbound, const inet::Ipv4Context ctx)
 {
     co_await ipv4_manager->async_send_ipv4_packet(outbound, ctx);
 }
 
+co_async<> NetworkController::async_send_ipv4_packet(const std::vector<SocketBuffer> outbounds, const inet::Ipv4Context ctx)
+{
+    co_await ipv4_manager->async_send_ipv4_packet(outbounds, ctx);
+}
+
 co_async<> NetworkController::async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const trans::UdpContext ctx)
 {
-    co_return;
+    co_await udp_manager->async_send_udp_segment(outbounds, ctx);
 }
 
 co_async<> NetworkController::on_udp_segment_received(const SocketBuffer& inbound, const trans::UdpContext& ctx)
 {
-    co_return;
+    co_await udp_manager->on_udp_segment_received(inbound, ctx);
 }
 
 }

@@ -29,7 +29,6 @@ Runtime::Runtime(int num_workers, std::shared_ptr<spdlog::logger> log)
     : impl(std::make_unique<Impl>())
 {
     impl->logger = log ? log : utils::create_async_logger("runtime");
-    impl->logger->info("created with {} workers", num_workers);
     CurrentRuntime = this;
 
     if (num_workers == 0)
@@ -47,8 +46,6 @@ Runtime::Runtime(int num_workers, std::shared_ptr<spdlog::logger> log)
     impl->logger->info("[Runtime] packet fanout id: {}", impl->fanout_id);
 
     impl->controller = std::make_shared<net::NetworkController>(impl->logger);
-
-    start();
 }
 
 Runtime::~Runtime()
@@ -63,17 +60,23 @@ Runtime*& Runtime::current()
     return CurrentRuntime;
 }
 
-void Runtime::config_network(const std::string& interface_name, const std::string& ip) const
+void Runtime::start_network(const std::string& interface_name, const std::string& ip)
 {
     impl->controller->set_interface_name(interface_name);
     if (auto address = net::IpAddress::from(ip))
     {
         impl->controller->set_host_ip(address.value());
+        start();
     }
     else
     {
         impl->logger->warn("[Runtime] invalid ip address {}", ip);
     }
+}
+
+std::shared_ptr<net::SocketRegistry> Runtime::current_network() const
+{
+    return impl->controller;
 }
 
 void Runtime::spawn(std::coroutine_handle<> h)
@@ -99,6 +102,8 @@ void Runtime::start()
             polling->run(token);
         });
     }
+
+    impl->logger->info("[Runtime] created with {} workers", num_workers);
 }
 
 void Runtime::stop() const

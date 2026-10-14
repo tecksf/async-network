@@ -28,7 +28,7 @@ file(GLOB_RECURSE CORO_SOURCES src/async/*.cpp src/net/*.cpp src/utils/*.cpp)
 add_library(coro STATIC ${CORO_SOURCES})
 target_link_libraries(coro PUBLIC pthread spdlog::spdlog ${LIBURING_LIBRARIES})
 
-file(GLOB_RECURSE NET_SOURCES src/net/*.cpp src/utils/*.cpp)
+file(GLOB_RECURSE NET_SOURCES src/net/*.cpp src/utils/*.cpp src/socket/*.cpp)
 add_library(net STATIC ${NET_SOURCES})
 target_link_libraries(net PUBLIC spdlog::spdlog)
 

@@ -21,6 +21,9 @@ constexpr int UDP_HEADER_SIZE = 8;
 constexpr int ICMP_HEADER_SIZE = 4;
 constexpr int ARP_HEADER_SIZE = 28;
 
+constexpr int ETHERNET_MTU = 1480;
+constexpr int IP_V4_MTU = ETHERNET_MTU - IPv4_HEADER_SIZE;
+
 }
 
 #endif //ASYNC_NETWORK_TYPES_H

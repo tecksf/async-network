@@ -85,6 +85,12 @@ co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
         context.source = packet.get_source_ip();
         co_await icmp_manager.on_icmp_v4_packet_received(whole_inbound, context);
     }
+    else if (protocol == Protocol::UDP)
+    {
+        trans::UdpContext context;
+        context.ip = packet.get_source_ip();
+        co_await trans->on_udp_segment_received(whole_inbound, context);
+    }
     else
     {
         logger->warn("unsupported protocol: {}", static_cast<int>(packet.get_protocol()));
@@ -111,10 +117,58 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const SocketBuffer& outbound, con
     packet.set_destination_ip(ctx.destination);
     packet.seal();
 
-    // logger->info("send IP packet: destination ip={}, identification={}, fragment offset={}",
-    //              std::string(ctx.destination), packet.get_identification(), packet.get_fragment_offset());
-
     co_await link->async_send_ethernet_frame(outbound, context);
+}
+
+co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& outbounds, const Ipv4Context& ctx)
+{
+    const size_t fragment_count = outbounds.size();
+    if (fragment_count == 1)
+    {
+        co_await async_send_ipv4_packet(outbounds.at(0), ctx);
+        co_return;
+    }
+
+    std::optional<MacAddress> mac = co_await async_retrieve_mac_address(ctx.destination);
+    if (!mac.has_value())
+    {
+        co_return;
+    }
+
+    link::EthernetContext context;
+    context.protocol = Protocol::IPv4;
+    context.destination = mac.value();
+
+    size_t offset = 0;
+    size_t current = 1;
+    const auto id = fetch_identification();
+
+    for (auto& outbound: outbounds)
+    {
+        const size_t payload_size = outbound->size();
+        Ipv4Packet packet(outbound->allocate(Ipv4Packet::HeaderSize), true);
+        packet.set_total_length(Ipv4Packet::HeaderSize + payload_size);
+        packet.set_identification(id);
+        packet.set_fragment_offset(offset / Ipv4Packet::FragmentAlignment);
+        packet.set_protocol(ctx.protocol);
+        packet.set_source_ip(inet->get_host_ip());
+        packet.set_destination_ip(ctx.destination);
+
+        if (current > 1 && current == fragment_count)
+        {
+            packet.set_fragment(true);
+        }
+        else
+        {
+            packet.set_fragment(false);
+        }
+
+        packet.seal();
+        offset += payload_size;
+        current++;
+
+        co_await link->async_send_ethernet_frame(outbound, context);
+    }
 }
 
 co_async<std::optional<MacAddress>> Ipv4Manager::async_retrieve_mac_address(const IpAddress& ip) const
@@ -145,7 +199,7 @@ SocketBuffer Ipv4Manager::assemble_ipv4_fragment(const Ipv4Packet& packet, const
     std::lock_guard<std::mutex> lock(fragment_table_mutex);
 
     auto [it, _] = fragment_table.try_emplace(key);
-    auto fragment_entry = it->second;
+    auto& fragment_entry = it->second;
 
     uint32_t start = packet.get_fragment_offset(), finish = packet.get_fragment_offset() + packet.get_payload().size();
     if (has_overlapping(fragment_entry.received_ranges, start, finish))

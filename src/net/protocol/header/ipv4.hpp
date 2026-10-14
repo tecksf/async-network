@@ -11,8 +11,8 @@ namespace coro::net::inet {
 
 class Ipv4Packet : public LayerStreamBuilder<Ipv4Packet> {
 public:
-    static constexpr size_t HeaderSize = 20;
-    static constexpr size_t MTU = 1480;
+    static constexpr size_t HeaderSize = IPv4_HEADER_SIZE;
+    static constexpr size_t MTU = IP_V4_MTU;
     static constexpr size_t Version = 4;
     static constexpr size_t FragmentAlignment = 8;
     static constexpr size_t FlagOffset = 6;

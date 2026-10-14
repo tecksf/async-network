@@ -23,7 +23,7 @@ enum class IcmpType {
 
 class Icmpv4Packet : public LayerStreamBuilder<Icmpv4Packet> {
 public:
-    static constexpr size_t HeaderSize = 4;
+    static constexpr size_t HeaderSize = ICMP_HEADER_SIZE;
 
     explicit Icmpv4Packet(std::span<uint8_t> data, bool create = false)
         : type(data.first(1))

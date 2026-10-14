@@ -1,6 +1,7 @@
 #ifndef ASYNC_NETWORK_ENCODING_H
 #define ASYNC_NETWORK_ENCODING_H
 
+#include <concepts>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -19,6 +20,12 @@ void to_big_endian(std::span<uint8_t, 2> dest, uint16_t num);
 void to_big_endian(std::span<uint8_t, 4> dest, uint32_t num);
 void to_little_endian(std::span<uint8_t, 2> dest, uint16_t num);
 void to_little_endian(std::span<uint8_t, 4> dest, uint32_t num);
+
+template <std::integral Integer>
+constexpr Integer align_down_8(Integer n)
+{
+    return n & ~static_cast<Integer>(7);
+}
 
 class Checksum {
 public:
