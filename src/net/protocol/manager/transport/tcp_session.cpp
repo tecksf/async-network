@@ -138,9 +138,12 @@ TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& heade
 
     uint32_t seq = header.get_sequence_number();
     ack_number = seq + 1;
+    sequence_number = rand_uint<uint32_t>() & 0xffff;
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
-    send_tcp_segment_without_payload(outbound, TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK);
+    send_tcp_segment(outbound, TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK);
+
+    sequence_number += 1;
 
     return TcpState::SynReceived;
 }
@@ -154,13 +157,15 @@ TcpState TcpSession::process_tcp_segment_in_syn_received_state(const TcpSegment&
     }
 
     uint32_t ack = header.get_ack_number();
-    if (ack != sequence_number + 1)
+    uint32_t seq = header.get_sequence_number();
+    if (ack != sequence_number || seq != ack_number)
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
         return state;
     }
 
-    sequence_number = ack;
+    ack_number += payload->size();
+
     return TcpState::Established;
 }
 
@@ -183,31 +188,31 @@ TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& hea
     ack_number = header.get_sequence_number() + 1;
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
-    send_tcp_segment_without_payload(outbound, TcpSegment::FLAG_ACK);
+    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
 
     return TcpState::Established;
 }
 
 TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& header, const SocketBuffer& payload)
 {
-    if (header.contains(TcpSegment::FLAG_ACK))
-    {
-        sequence_number = header.get_ack_number();
-    }
+    uint32_t ack = header.get_ack_number();
+    uint32_t seq = header.get_sequence_number();
 
-    if (header.contains(TcpSegment::FLAG_PSH) and payload->size() > 0)
+    if (ack != sequence_number || seq != ack_number)
     {
-        // session->receiveUserData(header.get_sequence_number(), payload);
+        logger->warn("{} invalid ack number: {}", get_string_state(), ack);
+        return state;
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
     {
-        auto fin_seq = header.get_sequence_number() + payload->size();
+        ack_number += 1;
+        auto fin_seq = seq + payload->size();
         finish_sequence = fin_seq;
     }
 
     auto outbound = app->allocate_socket_buffer();
-    send_tcp_segment_without_payload(outbound, TcpSegment::FLAG_ACK);
+    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
 
     if (finish_sequence.has_value() and finish_sequence.value() + 1 == ack_number)
     {
@@ -232,7 +237,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
     {
         ack_number = header.get_sequence_number() + 1;
         sequence_number = ack;
-        send_tcp_segment_without_payload(outbound, TcpSegment::FLAG_ACK);
+        send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
 
         return TcpState::TimeWait;
     }
@@ -240,7 +245,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
     if (header.contains(TcpSegment::FLAG_FIN))
     {
         ack_number = header.get_sequence_number() + 1;
-        send_tcp_segment_without_payload(outbound, TcpSegment::FLAG_ACK);
+        send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
         return TcpState::Closing;
     }
 
@@ -265,7 +270,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
     ack_number = header.get_sequence_number() + 1;
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
-    send_tcp_segment_without_payload(outbound, TcpSegment::FLAG_ACK);
+    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
 
     return TcpState::TimeWait;
 }
@@ -296,13 +301,12 @@ TcpState TcpSession::process_tcp_segment_in_last_ack_state(const TcpSegment& hea
     }
 
     uint32_t ack = header.get_ack_number();
-    if (ack != sequence_number + 1)
+    if (ack != sequence_number)
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
         return state;
     }
 
-    sequence_number = ack;
     return TcpState::Closed;
 }
 
@@ -317,30 +321,52 @@ TcpState TcpSession::process_tcp_segment_in_closed_state(const TcpSegment& heade
     return state;
 }
 
-void TcpSession::send_tcp_segment_without_payload(const SocketBuffer& outbound, uint8_t flag, uint16_t window_size)
+void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size)
 {
-    auto text = outbound->allocate(trans::TcpSegment::HeaderSize);
+    SocketBuffer outbound = payload;
+    auto text = outbound->allocate(TcpSegment::HeaderSize);
 
-    trans::TcpSegment segment(text, true);
+    TcpSegment segment(text, true);
     segment.set_source_port(local.port);
     segment.set_destination_port(remote.port);
     segment.set_sequence_number(sequence_number);
     segment.set_ack_number(ack_number);
     segment.set_flag(flag);
-    segment.set_header_len(trans::TcpSegment::HeaderSize);
+    segment.set_header_len(TcpSegment::HeaderSize);
     segment.set_window_size(window_size);
 
-    trans::FakeHeader fake_header;
+    FakeHeader fake_header;
     fake_header.set_source_ip(local.ip);
     fake_header.set_destination_ip(remote.ip);
     fake_header.set_protocol(Protocol::TCP);
-    fake_header.set_length(TcpSegment::HeaderSize);
+    fake_header.set_length(TcpSegment::HeaderSize + payload->size());
     segment.seal(fake_header, outbound);
 
-    trans::TcpContext context;
+    sequence_number += payload->size();
+
+    TcpContext context;
     context.ip = remote.ip;
     context.protocol = Protocol::TCP;
     app->sumit_task(trans->async_send_tcp_segment(outbound, context));
+}
+
+void TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
+{
+    for (auto payload: payloads)
+    {
+        send_tcp_segment(payload, TcpSegment::FLAG_ACK | TcpSegment::FLAG_PSH);
+    }
+}
+
+void TcpSession::close()
+{
+    if (state == TcpState::CloseWait)
+    {
+        auto outbound = app->allocate_socket_buffer();
+        send_tcp_segment(outbound, TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK);
+        sequence_number += 1;
+        switch_to(TcpState::LastAck);
+    }
 }
 
 }

@@ -14,7 +14,6 @@ TcpManager::~TcpManager()
 {
 }
 
-
 co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, const TcpContext& ctx)
 {
     const auto segment = trans::TcpSegment::build(inbound->get_header_payload());
@@ -46,8 +45,25 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     std::lock_guard<std::mutex> lock(socket_mutex);
     if (auto conn = connection_sessions.find(handle); conn != connection_sessions.end())
     {
-        auto session = conn->second;
-        session->process_tcp_segment(header, payload);
+        auto [conn_session, waiter] = conn->second->process_tcp_segment(header, payload);
+        if (conn_session and conn_session->is_connected())
+        {
+            sockets.emplace(conn_session->get_socket_fd(), conn_session);
+        }
+
+        if (waiter)
+        {
+            if (waiter->operation == SocketOperation::Connect)
+            {
+                waiter->address = handle.remote;
+                waiter->result = conn_session->get_socket_fd();
+            }
+            else if (waiter->operation == SocketOperation::Read)
+            {
+            }
+
+            app->notify_user(waiter->handle);
+        }
     }
     else if (auto listen = listen_sessions.find(handle.local); listen != listen_sessions.end())
     {
@@ -118,10 +134,48 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
                 listen_session->add_waiter(ctx);
             }
         }
+        else if (ctx->operation == SocketOperation::Write)
+        {
+            auto it = sockets.find(ctx->fd);
+            if (it == sockets.end())
+            {
+                ctx->result = -EBADF;
+                break;
+            }
+
+            auto session = it->second;
+            if (not session->is_connected())
+            {
+                ctx->result = -ENOTCONN;
+                break;
+            }
+
+            session->send_user_data(copy_user_data_to_buffer(ctx->data));
+            ctx->result = static_cast<int>(ctx->data.size());
+        }
     } while (false);
 
-
     return done;
+}
+
+std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data) const
+{
+    std::vector<SocketBuffer> outbounds;
+    constexpr int max_capacity = align_down_8(IP_V4_MTU) - TcpSegment::HeaderSize;
+
+    std::span<uint8_t> rest = user_data;
+    while (not rest.empty())
+    {
+        const int len = std::min(static_cast<int>(rest.size()), max_capacity);
+        auto outbound = app->allocate_socket_buffer();
+        outbound->allocate(len);
+        std::copy_n(rest.begin(), len, outbound->begin());
+        outbounds.push_back(outbound);
+
+        rest = rest.subspan(len);
+    }
+
+    return outbounds;
 }
 
 std::shared_ptr<spdlog::logger> TcpManager::get_logger() const

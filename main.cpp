@@ -70,15 +70,17 @@ static co_async<> start_tcp_echo(std::shared_ptr<spdlog::logger> logger, std::st
     while (true)
     {
         logger->info("TCP Socket listen...");
-        auto socket = co_await listen.accept();
-        if (not socket.has_value())
+        auto result = co_await listen.accept();
+        if (not result.has_value())
         {
-            logger->error("Accept failed: {}", socket.error().message());
+            logger->error("Accept failed: {}", result.error().message());
             break;
         }
 
-        auto client = socket.value();
-        logger->info("Accepted a new connection from {}:{}", client.get_ip_address().to_string(), client.get_port());
+        auto socket = result.value();
+        logger->info("Accepted a new connection from {}:{}", socket.get_ip_address().to_string(), socket.get_port());
+
+        co_await socket.write("hello, I'm tcp echo!");
     }
 
     group.done();

@@ -13,8 +13,6 @@
 
 namespace coro::net::trans {
 
-
-
 class TcpManager {
 public:
     TcpManager(app::ApplicationService* app, inet::InternetService* inet, trans::TransportService* trans,
@@ -27,6 +25,9 @@ public:
     app::ApplicationService* get_app() const;
     trans::TransportService* get_trans() const;
     bool handle_user_socket_operation(UserSocketContext* ctx);
+
+private:
+    std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data) const;
 
 private:
     app::ApplicationService* app;

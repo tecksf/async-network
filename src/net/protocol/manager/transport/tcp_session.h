@@ -56,9 +56,12 @@ public:
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
     void process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
+    void send_user_data(const std::vector<SocketBuffer>& payloads);
+    virtual void add_waiter(UserSocketContext* ctx) = 0;
+    void close();
 
 protected:
-    void send_tcp_segment_without_payload(const SocketBuffer& outbound, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
+    void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
     void switch_to(TcpState next_state);
 
 protected:
@@ -92,7 +95,7 @@ protected:
     std::optional<uint32_t> finish_sequence;
 };
 
-class TcpConnectSession : public TcpSession {
+class TcpConnectSession : public TcpSession, public std::enable_shared_from_this<TcpConnectSession> {
 public:
     TcpConnectSession(TcpManager* manager, TcpState s, const TcpSocketHandle& handle)
         : TcpSession(manager, s, handle.local)
@@ -103,7 +106,7 @@ public:
         {
             sequence_number = rand_uint<uint32_t>() & 0xffff;
             auto outbound = app->allocate_socket_buffer();
-            send_tcp_segment_without_payload(outbound, TcpSegment::FLAG_SYN);
+            send_tcp_segment(outbound, TcpSegment::FLAG_SYN);
         }
     }
 
@@ -119,6 +122,35 @@ public:
     {
         return TcpSocketHandle{.local = local, .remote = remote};
     }
+
+    std::pair<std::shared_ptr<TcpConnectSession>, UserSocketContext*>
+    process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
+    {
+        UserSocketContext* waiter = nullptr;
+        std::shared_ptr<TcpConnectSession> session = nullptr;
+
+        TcpState prev = state;
+        TcpSession::process_tcp_segment(header, payload);
+
+        if (prev != state && state == TcpState::Established)
+        {
+            std::swap(waiter, read_waiter);
+            session = shared_from_this();
+        }
+
+        return std::pair(session, waiter);
+    }
+
+    void add_waiter(UserSocketContext* ctx) override
+    {
+        if (ctx && read_waiter == nullptr)
+        {
+            read_waiter = ctx;
+        }
+    }
+
+private:
+    UserSocketContext* read_waiter = nullptr;
 };
 
 
@@ -147,11 +179,11 @@ public:
         return session;
     }
 
-    void add_waiter(UserSocketContext* ctx)
+    void add_waiter(UserSocketContext* ctx) override
     {
         if (ctx != nullptr)
         {
-            waiters.push_back(ctx);
+            accept_waiters.push_back(ctx);
         }
     }
 
@@ -169,10 +201,10 @@ public:
             auto client_session = it->second;
             client_session->process_tcp_segment(header, payload);
 
-            if (client_session->is_connected() && not waiters.empty())
+            if (client_session->is_connected() && not accept_waiters.empty())
             {
-                auto w = waiters.front();
-                waiters.pop_front();
+                auto w = accept_waiters.front();
+                accept_waiters.pop_front();
                 accept_queue.erase(it);
                 return std::pair{client_session, w};
             }
@@ -183,7 +215,7 @@ public:
 
 private:
     std::map<SocketAddress, std::shared_ptr<TcpConnectSession>> accept_queue;
-    std::deque<UserSocketContext*> waiters;
+    std::deque<UserSocketContext*> accept_waiters;
 };
 
 
