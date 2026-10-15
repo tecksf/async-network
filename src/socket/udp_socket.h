@@ -31,7 +31,6 @@ public:
 
 private:
     explicit UdpSocket(int fd, const SocketAddress& address);
-    void close_sync() noexcept;
 
     SocketAddress local;
     std::optional<SocketAddress> remote;

@@ -39,7 +39,7 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
 {
     if (this != &other)
     {
-        close_sync();
+        Socket::close(Protocol::UDP);
         fd = other.fd;
         local = other.local;
         remote = std::move(other.remote);
@@ -50,21 +50,7 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
 
 UdpSocket::~UdpSocket()
 {
-    close_sync();
-}
-
-void UdpSocket::close_sync() noexcept
-{
-    if (fd < 0)
-    {
-        return;
-    }
-
-    const int owned_fd = fd;
-    fd = -1;
-
-    auto network = Runtime::current()->current_network();
-    network->emit_close_socket_event(Protocol::UDP, owned_fd);
+    Socket::close(Protocol::UDP);
 }
 
 void UdpSocket::connect(const std::string& addr)

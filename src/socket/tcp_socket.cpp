@@ -1,5 +1,7 @@
 #include "tcp_socket.h"
 #include <async/runtime.h>
+#include <new>
+#include <utility>
 
 namespace coro::net {
 
@@ -8,6 +10,30 @@ TcpSocket::TcpSocket(int fd, const SocketAddress& local, const SocketAddress& re
       , local(local)
       , remote(remote)
 {
+}
+
+
+TcpSocket::TcpSocket(TcpSocket&& other) noexcept
+    : Socket(other.fd)
+      , local(other.local)
+      , remote(other.remote)
+{
+    other.fd = -1;
+}
+
+TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept
+{
+    if (this != &other)
+    {
+        this->~TcpSocket();
+        new(this) TcpSocket(std::move(other));
+    }
+    return *this;
+}
+
+TcpSocket::~TcpSocket()
+{
+    Socket::close(Protocol::TCP);
 }
 
 IpAddress TcpSocket::get_ip_address() const
@@ -41,6 +67,14 @@ TcpReadAwaiter TcpSocket::read(std::span<uint8_t> data) const
 {
     auto network = Runtime::current()->current_network();
     return TcpReadAwaiter(network, fd, data);
+}
+
+CloseAwaiter TcpSocket::close()
+{
+    auto network = Runtime::current()->current_network();
+    auto awaiter = CloseAwaiter(network, fd, Protocol::TCP);
+    fd = -1;
+    return awaiter;
 }
 
 }

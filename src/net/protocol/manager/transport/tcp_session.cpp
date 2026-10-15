@@ -1,5 +1,6 @@
 #include "tcp_session.h"
 #include "tcp_manager.h"
+#include <async/coro.h>
 #include <protocol/header/tcp.hpp>
 
 namespace coro::net::trans {
@@ -13,10 +14,12 @@ TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& loc
       local(local)
 {
     state = s;
+    logger->debug("===> TCP session [{0}] created: State: {1}", session_id, get_state_name(s));
 }
 
 TcpSession::~TcpSession()
 {
+    logger->debug("===> TCP session [{0}] destroyed", session_id);
 }
 
 TcpSession::TcpSession(const TcpSession& session)
@@ -44,6 +47,11 @@ TcpState TcpSession::get_state() const
 bool TcpSession::is_connected() const
 {
     return state == TcpState::Established;
+}
+
+bool TcpSession::is_writable() const
+{
+    return state == TcpState::Established || state == TcpState::CloseWait;
 }
 
 bool TcpSession::is_closed() const
@@ -125,7 +133,12 @@ void TcpSession::switch_to(TcpState next_state)
     }
 
     state = next_state;
-    logger->debug("TCP session {0}: State change: {1} --> {2}", session_id, get_state_name(prev_state), get_state_name(next_state));
+    logger->debug("===> TCP session [{0}] State change: {1} --> {2}", session_id, get_state_name(prev_state), get_state_name(next_state));
+
+    if (next_state == TcpState::TimeWait)
+    {
+        start_time_wait_timer();
+    }
 }
 
 TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload)
@@ -184,7 +197,6 @@ TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& hea
         return state;
     }
 
-    sequence_number = ack;
     ack_number = header.get_sequence_number() + 1;
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
@@ -225,7 +237,9 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
 TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload)
 {
     uint32_t ack = header.get_ack_number();
-    if (ack != sequence_number + 1)
+    uint32_t seq = header.get_sequence_number();
+
+    if (ack != sequence_number || seq != ack_number)
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
         return state;
@@ -235,23 +249,20 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
 
     if (header.contains(TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK))
     {
-        ack_number = header.get_sequence_number() + 1;
-        sequence_number = ack;
+        ack_number += 1;
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
-
         return TcpState::TimeWait;
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
     {
-        ack_number = header.get_sequence_number() + 1;
+        ack_number += 1;
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
         return TcpState::Closing;
     }
 
     if (header.contains(TcpSegment::FLAG_ACK))
     {
-        sequence_number = ack;
         return TcpState::FinWait2;
     }
 
@@ -267,7 +278,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
         return state;
     }
 
-    ack_number = header.get_sequence_number() + 1;
+    ack_number += 1;
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
@@ -312,6 +323,17 @@ TcpState TcpSession::process_tcp_segment_in_last_ack_state(const TcpSegment& hea
 
 TcpState TcpSession::process_tcp_segment_in_time_wait_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    if (header.contains(TcpSegment::FLAG_FIN))
+    {
+        SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
+        send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+
+        logger->debug("{} received retransmitted fin, restarting 2MSL timer", get_string_state());
+        start_time_wait_timer();
+        return state;
+    }
+
+    logger->warn("{} waiting for 2MSL timeout, will ignore...", get_string_state());
     return state;
 }
 
@@ -358,15 +380,71 @@ void TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
     }
 }
 
+void TcpSession::start_time_wait_timer()
+{
+    logger->debug("===> TCP session [{0}] Entering TimeWait, will wait {1}s (2MSL) before closing",
+                  session_id, TimeWaitTimeout.count());
+
+    if (time_wait_cancelled)
+    {
+        time_wait_cancelled->store(true, std::memory_order_release);
+    }
+
+    time_wait_cancelled = std::make_shared<std::atomic_bool>(false);
+    app->sumit_task(time_wait_timer(time_wait_cancelled));
+}
+
+co_async<> TcpSession::time_wait_timer(std::shared_ptr<std::atomic_bool> cancelled)
+{
+    co_await coro::sleep(TimeWaitTimeout);
+    if (cancelled->load(std::memory_order_acquire))
+    {
+        co_return;
+    }
+
+    // todo: not safe in multi threads
+    switch_to(TcpState::Closed);
+}
+
 void TcpSession::close()
 {
-    if (state == TcpState::CloseWait)
-    {
+    auto send_fin_segment = [this]() {
         auto outbound = app->allocate_socket_buffer();
         send_tcp_segment(outbound, TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK);
         sequence_number += 1;
-        switch_to(TcpState::LastAck);
+    };
+
+    TcpState next_state = state;
+    switch (state)
+    {
+        case TcpState::Listen:
+            next_state = TcpState::Closed;
+            break;
+        case TcpState::SynReceived:
+            send_fin_segment();
+            next_state = TcpState::FinWait1;
+            break;
+        case TcpState::SynSent:
+            next_state = TcpState::Closed;
+            break;
+        case TcpState::Established:
+            send_fin_segment();
+            next_state = TcpState::FinWait1;
+            break;
+        case TcpState::FinWait1: break;
+        case TcpState::FinWait2: break;
+        case TcpState::CloseWait:
+            send_fin_segment();
+            next_state = TcpState::LastAck;
+            break;
+        case TcpState::Closing: break;
+        case TcpState::LastAck: break;
+        case TcpState::TimeWait: break;
+        case TcpState::Closed: break;
+        default:
+            break;
     }
+    switch_to(next_state);
 }
 
 }

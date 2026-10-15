@@ -46,9 +46,17 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     if (auto conn = connection_sessions.find(handle); conn != connection_sessions.end())
     {
         auto [conn_session, waiter] = conn->second->process_tcp_segment(header, payload);
-        if (conn_session and conn_session->is_connected())
+        if (conn_session && conn_session == conn->second)
         {
-            sockets.emplace(conn_session->get_socket_fd(), conn_session);
+            if (conn_session->is_connected())
+            {
+                sockets.emplace(conn_session->get_socket_fd(), conn_session);
+            }
+            else if (conn_session->is_closed())
+            {
+                sockets.erase(conn_session->get_socket_fd());
+                connection_sessions.erase(conn);
+            }
         }
 
         if (waiter)
@@ -144,7 +152,7 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
             }
 
             auto session = it->second;
-            if (not session->is_connected())
+            if (not session->is_writable())
             {
                 ctx->result = -ENOTCONN;
                 break;
@@ -152,6 +160,15 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
 
             session->send_user_data(copy_user_data_to_buffer(ctx->data));
             ctx->result = static_cast<int>(ctx->data.size());
+        }
+        else if (ctx->operation == SocketOperation::Close)
+        {
+            if (auto it = sockets.find(ctx->fd); it != sockets.end())
+            {
+                auto session = it->second;
+                session->close();
+                ctx->result = 0;
+            }
         }
     } while (false);
 

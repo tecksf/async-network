@@ -33,6 +33,8 @@ public:
     virtual ~Socket() = default;
 
 protected:
+    void close(Protocol protocol) noexcept;
+
     int fd;
 };
 

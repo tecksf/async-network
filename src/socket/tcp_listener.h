@@ -18,6 +18,7 @@ public:
     TcpListener(TcpListener&& other) noexcept;
     TcpListener& operator=(TcpListener&& other) noexcept;
     TcpAcceptAwaiter accept() const;
+    CloseAwaiter close();
 
 private:
     explicit TcpListener(int fd, const SocketAddress& address);

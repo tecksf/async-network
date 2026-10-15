@@ -27,6 +27,7 @@ TcpListener::TcpListener(int fd, const SocketAddress& address)
 
 TcpListener::~TcpListener()
 {
+    Socket::close(Protocol::TCP);
 }
 
 TcpListener::TcpListener(TcpListener&& other) noexcept
@@ -41,6 +42,7 @@ TcpListener& TcpListener::operator=(TcpListener&& other) noexcept
 {
     if (this != &other)
     {
+        Socket::close(Protocol::TCP);
         fd = other.fd;
         local = other.local;
         other.fd = -1;
@@ -52,6 +54,14 @@ TcpAcceptAwaiter TcpListener::accept() const
 {
     auto network = Runtime::current()->current_network();
     return TcpAcceptAwaiter(network, fd, local);
+}
+
+CloseAwaiter TcpListener::close()
+{
+    auto network = Runtime::current()->current_network();
+    auto awaiter = CloseAwaiter(network, fd, Protocol::TCP);
+    fd = -1;
+    return awaiter;
 }
 
 }

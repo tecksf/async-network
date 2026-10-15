@@ -52,6 +52,7 @@ public:
     bool is_connected() const;
     bool is_closed() const;
     int get_socket_fd() const;
+    bool is_writable() const;
     std::string_view get_string_state() const;
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
@@ -63,6 +64,8 @@ public:
 protected:
     void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
     void switch_to(TcpState next_state);
+    co_async<> time_wait_timer(std::shared_ptr<std::atomic_bool> cancelled);
+    void start_time_wait_timer();
 
 protected:
     TcpState process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload);
@@ -78,6 +81,9 @@ protected:
     TcpState process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload);
 
 protected:
+    static constexpr std::chrono::seconds MaximumSegmentLifetime{3};
+    static constexpr std::chrono::seconds TimeWaitTimeout{MaximumSegmentLifetime * 2};
+
     app::ApplicationService* app;
     trans::TransportService* trans;
     std::shared_ptr<spdlog::logger> logger;
@@ -93,6 +99,7 @@ protected:
     SocketAddress remote;
 
     std::optional<uint32_t> finish_sequence;
+    std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
 };
 
 class TcpConnectSession : public TcpSession, public std::enable_shared_from_this<TcpConnectSession> {
@@ -126,31 +133,31 @@ public:
     std::pair<std::shared_ptr<TcpConnectSession>, UserSocketContext*>
     process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
     {
-        UserSocketContext* waiter = nullptr;
+        UserSocketContext* w = nullptr;
         std::shared_ptr<TcpConnectSession> session = nullptr;
 
         TcpState prev = state;
         TcpSession::process_tcp_segment(header, payload);
 
-        if (prev != state && state == TcpState::Established)
+        if (prev != state && (state == TcpState::Established || state == TcpState::Closed))
         {
-            std::swap(waiter, read_waiter);
+            std::swap(waiter, w);
             session = shared_from_this();
         }
 
-        return std::pair(session, waiter);
+        return std::pair(session, w);
     }
 
     void add_waiter(UserSocketContext* ctx) override
     {
-        if (ctx && read_waiter == nullptr)
+        if (ctx && waiter == nullptr)
         {
-            read_waiter = ctx;
+            waiter = ctx;
         }
     }
 
 private:
-    UserSocketContext* read_waiter = nullptr;
+    UserSocketContext* waiter = nullptr;
 };
 
 
@@ -161,7 +168,13 @@ public:
     {
     }
 
-    ~TcpListenSession() override = default;
+    ~TcpListenSession() override
+    {
+        for (auto& [_, session] : accept_queue)
+        {
+            session->close();
+        }
+    }
 
     std::shared_ptr<TcpConnectSession> accept_client()
     {
