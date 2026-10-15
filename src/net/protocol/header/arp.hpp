@@ -21,8 +21,8 @@ public:
           , operate_code(data.subspan(6, 2))
           , sender_mac(data.subspan(8, 6))
           , sender_ip(data.subspan(14, 4))
-          , receiver_mac(data.subspan(18, 6))
-          , receiver_ip(data.subspan(24, 4))
+          , target_mac(data.subspan(18, 6))
+          , target_ip(data.subspan(24, 4))
     {
         if (create)
         {
@@ -38,74 +38,74 @@ public:
 
     ~ArpPacket() = default;
 
-    bool isValid() const
+    bool is_valid() const
     {
         return hardware_len == 6 && protocol_len == 4 &&
                from_little_endian(hardware_type[1], hardware_type[0]) == static_cast<uint16_t>(Protocol::Ethernet) &&
                from_little_endian(protocol[1], protocol[0]) == static_cast<uint16_t>(Protocol::IPv4);
     }
 
-    bool notToReply() const
+    bool not_to_reply() const
     {
-        return std::equal(receiver_ip.begin(), receiver_ip.end(), sender_ip.begin()) &&
-               getReceiverMacAddress().is_null();
+        return std::equal(target_ip.begin(), target_ip.end(), sender_ip.begin()) &&
+               get_target_mac().is_null();
     }
 
-    bool isRequest() const
+    bool is_request() const
     {
         return from_big_endian(operate_code[0], operate_code[1]) == RequestOperation;
     }
 
-    bool isResponse() const
+    bool is_response() const
     {
         return from_big_endian(operate_code[0], operate_code[1]) == ReplyOperation;
     }
 
-    IpAddress getReceiverIpAddress() const
+    IpAddress get_target_ip() const
     {
-        return IpAddress(receiver_ip);
+        return IpAddress(target_ip);
     }
 
-    IpAddress getSenderIpAddress() const
+    IpAddress get_sender_ip() const
     {
         return IpAddress(sender_ip);
     }
 
-    MacAddress getReceiverMacAddress() const
+    MacAddress get_target_mac() const
     {
-        return MacAddress(receiver_mac);
+        return MacAddress(target_mac);
     }
 
-    MacAddress getSenderMacAddress() const
+    MacAddress get_sender_mac() const
     {
         return MacAddress(sender_mac);
     }
 
-    void setReceiverIpAddress(const IpAddress& ip)
+    void set_target_ip(const IpAddress& ip)
     {
         auto bytes = ip.as_bytes();
-        std::ranges::copy(bytes, receiver_ip.begin());
+        std::ranges::copy(bytes, target_ip.begin());
     }
 
-    void setSenderIpAddress(const IpAddress& ip)
+    void set_sender_ip(const IpAddress& ip)
     {
         auto bytes = ip.as_bytes();
         std::ranges::copy(bytes, sender_ip.begin());
     }
 
-    void setReceiverMacAddress(const MacAddress& mac)
+    void set_target_mac(const MacAddress& mac)
     {
         auto bytes = mac.as_bytes();
-        std::ranges::copy(bytes, receiver_mac.begin());
+        std::ranges::copy(bytes, target_mac.begin());
     }
 
-    void setSenderMacAddress(const MacAddress& mac)
+    void set_sender_mac(const MacAddress& mac)
     {
         auto bytes = mac.as_bytes();
         std::ranges::copy(bytes, sender_mac.begin());
     }
 
-    void setOperateCode(uint16_t code)
+    void set_operate_code(uint16_t code)
     {
         operate_code[0] = (code & 0xff00) >> 8;
         operate_code[1] = code & 0xff;
@@ -119,8 +119,8 @@ private:
     std::span<uint8_t, 2> operate_code;
     std::span<uint8_t, 6> sender_mac;
     std::span<uint8_t, 4> sender_ip;
-    std::span<uint8_t, 6> receiver_mac;
-    std::span<uint8_t, 4> receiver_ip;
+    std::span<uint8_t, 6> target_mac;
+    std::span<uint8_t, 4> target_ip;
 };
 
 }

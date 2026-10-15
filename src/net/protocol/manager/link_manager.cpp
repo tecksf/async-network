@@ -104,19 +104,19 @@ co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound)
     inbound->consume(ArpPacket::HeaderSize);
 
     ArpPacket packet = input.value();
-    if (not packet.isValid())
+    if (not packet.is_valid())
     {
         logger->error("Invalid ARP Frame");
         co_return;
     }
 
-    const IpAddress ip = packet.getSenderIpAddress();
-    const MacAddress mac = packet.getSenderMacAddress();
+    const IpAddress ip = packet.get_sender_ip();
+    const MacAddress mac = packet.get_sender_mac();
     link->update_address_mapping(ip, mac);
 
-    if (packet.notToReply() or packet.isResponse())
+    if (packet.not_to_reply() or packet.is_response())
     {
-        logger->debug("no need to reply type");
+        // logger->debug("no need to reply type");
         co_return;
     }
 
@@ -132,11 +132,11 @@ co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound)
 co_async<> LinkManager::async_send_arp_packet(const SocketBuffer& outbound, const ArpContext& ctx) const
 {
     ArpPacket packet(outbound->allocate(ArpPacket::HeaderSize), true);
-    packet.setOperateCode(ctx.operate_code);
-    packet.setReceiverIpAddress(ctx.ip);
-    packet.setReceiverMacAddress(ctx.mac);
-    packet.setSenderMacAddress(link->get_host_mac());
-    packet.setSenderIpAddress(inet->get_host_ip());
+    packet.set_operate_code(ctx.operate_code);
+    packet.set_target_ip(ctx.ip);
+    packet.set_target_mac(ctx.mac);
+    packet.set_sender_mac(link->get_host_mac());
+    packet.set_sender_ip(inet->get_host_ip());
 
     EthernetContext context;
     context.protocol = ctx.protocol;
