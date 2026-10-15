@@ -223,4 +223,105 @@ std::expected<TcpSocket, std::error_code> TcpAcceptAwaiter::await_resume() const
     return std::unexpected(ec);
 }
 
+TcpConnectAwaiter::TcpConnectAwaiter(int err)
+    : AwaiterBase(nullptr)
+{
+    context.result = err;
+}
+
+TcpConnectAwaiter::TcpConnectAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address)
+    : AwaiterBase(network),
+      remote(address)
+{
+    context.address = address;
+    context.operation = SocketOperation::Connect;
+}
+
+bool TcpConnectAwaiter::await_ready() const noexcept
+{
+    return context.result < 0;
+}
+
+bool TcpConnectAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    context.handle = h;
+    bool done = network_stack->register_user_socket_operation(Protocol::TCP, &context);
+    return not done;
+}
+
+std::expected<TcpSocket, std::error_code> TcpConnectAwaiter::await_resume() const noexcept
+{
+    const int fd = context.result;
+    if (fd > 0)
+    {
+        return TcpSocket(fd, context.address, remote);
+    }
+    std::error_code ec(-fd, std::system_category());
+    return std::unexpected(ec);
+}
+
+TcpWriteAwaiter::TcpWriteAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer)
+    : AwaiterBase(network)
+{
+    context.fd = fd;
+    context.data = buffer;
+    context.operation = SocketOperation::Write;
+}
+
+bool TcpWriteAwaiter::await_ready() const noexcept
+{
+    return false;
+}
+
+bool TcpWriteAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    context.handle = h;
+    bool done = network_stack->register_user_socket_operation(Protocol::TCP, &context);
+    return not done;
+}
+
+std::expected<int, std::error_code> TcpWriteAwaiter::await_resume() const noexcept
+{
+    const int res = context.result;
+    if (res > 0)
+    {
+        return res;
+    }
+
+    std::error_code ec(-res, std::system_category());
+    return std::unexpected(ec);
+}
+
+TcpReadAwaiter::TcpReadAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer)
+    : AwaiterBase(network)
+{
+    context.fd = fd;
+    context.data = buffer;
+    context.operation = SocketOperation::Read;
+}
+
+bool TcpReadAwaiter::await_ready() const noexcept
+{
+    return false;
+}
+
+bool TcpReadAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    context.handle = h;
+    bool done = network_stack->register_user_socket_operation(Protocol::TCP, &context);
+    return not done;
+}
+
+std::expected<int, std::error_code> TcpReadAwaiter::await_resume() const noexcept
+{
+    const int res = context.result;
+    if (res > 0)
+    {
+        return res;
+    }
+
+    std::error_code ec(-res, std::system_category());
+    return std::unexpected(ec);
+}
+
 }

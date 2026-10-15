@@ -60,13 +60,38 @@ struct TcpBindAwaiter : AwaiterBase {
 };
 
 struct TcpAcceptAwaiter : AwaiterBase {
-    TcpAcceptAwaiter(std::shared_ptr<SocketRegistry> network,int fd, const SocketAddress& local);
+    TcpAcceptAwaiter(std::shared_ptr<SocketRegistry> network, int fd, const SocketAddress& local);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
     std::expected<TcpSocket, std::error_code> await_resume() const noexcept;
 
 private:
     SocketAddress local;
+};
+
+struct TcpConnectAwaiter : AwaiterBase {
+    explicit TcpConnectAwaiter(int err);
+    TcpConnectAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address);
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<> h) noexcept;
+    std::expected<TcpSocket, std::error_code> await_resume() const noexcept;
+
+private:
+    SocketAddress remote;
+};
+
+struct TcpWriteAwaiter : AwaiterBase {
+    TcpWriteAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer);
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<> h) noexcept;
+    std::expected<int, std::error_code> await_resume() const noexcept;
+};
+
+struct TcpReadAwaiter : AwaiterBase {
+    TcpReadAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer);
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<> h) noexcept;
+    std::expected<int, std::error_code> await_resume() const noexcept;
 };
 
 }
