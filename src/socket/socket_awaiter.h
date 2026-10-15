@@ -10,6 +10,8 @@
 namespace coro::net {
 
 class UdpSocket;
+class TcpSocket;
+class TcpListener;
 
 struct AwaiterBase {
     explicit AwaiterBase(std::shared_ptr<SocketRegistry> network);
@@ -46,6 +48,25 @@ struct UdpReceiveAwaiter : AwaiterBase {
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
     std::expected<std::pair<int, SocketAddress>, std::error_code> await_resume() const noexcept;
+};
+
+
+struct TcpBindAwaiter : AwaiterBase {
+    explicit TcpBindAwaiter(int err);
+    TcpBindAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address);
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<> h) noexcept;
+    std::expected<TcpListener, std::error_code> await_resume() const noexcept;
+};
+
+struct TcpAcceptAwaiter : AwaiterBase {
+    TcpAcceptAwaiter(std::shared_ptr<SocketRegistry> network,int fd, const SocketAddress& local);
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<> h) noexcept;
+    std::expected<TcpSocket, std::error_code> await_resume() const noexcept;
+
+private:
+    SocketAddress local;
 };
 
 }

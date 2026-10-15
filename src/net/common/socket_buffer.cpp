@@ -63,6 +63,13 @@ SocketBuffer& SocketBuffer::operator=(const SocketBuffer& other)
     return *this;
 }
 
+SocketBuffer SocketBuffer::reuse_for_outbound(const SocketBuffer& inbound)
+{
+    auto outbound = inbound;
+    outbound->reclaim();
+    return outbound;
+}
+
 SocketBuffer SocketBuffer::clone() const
 {
     return impl ? SocketBuffer(impl->clone()) : SocketBuffer{};

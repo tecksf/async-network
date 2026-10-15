@@ -1,6 +1,8 @@
 #include "socket_awaiter.h"
 #include <utility>
 #include "udp_socket.h"
+#include "tcp_socket.h"
+#include "tcp_listener.h"
 
 namespace coro::net {
 
@@ -150,6 +152,74 @@ std::expected<std::pair<int, SocketAddress>, std::error_code> UdpReceiveAwaiter:
     }
 
     std::error_code ec(-res, std::system_category());
+    return std::unexpected(ec);
+}
+
+TcpBindAwaiter::TcpBindAwaiter(int err)
+    : AwaiterBase(nullptr)
+{
+    context.result = err;
+}
+
+TcpBindAwaiter::TcpBindAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address)
+    : AwaiterBase(network)
+{
+    context.address = address;
+    context.operation = SocketOperation::Bind;
+}
+
+bool TcpBindAwaiter::await_ready() const noexcept
+{
+    return context.result < 0;
+}
+
+bool TcpBindAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    context.handle = h;
+    bool done = network_stack->register_user_socket_operation(Protocol::TCP, &context);
+    return not done;
+}
+
+std::expected<TcpListener, std::error_code> TcpBindAwaiter::await_resume() const noexcept
+{
+    const int fd = context.result;
+    if (fd > 0)
+    {
+        return TcpListener(fd, context.address);
+    }
+    std::error_code ec(-fd, std::system_category());
+    return std::unexpected(ec);
+}
+
+TcpAcceptAwaiter::TcpAcceptAwaiter(std::shared_ptr<SocketRegistry> network, int fd, const SocketAddress& local)
+    : AwaiterBase(network)
+      , local(local)
+{
+    context.fd = fd;
+    context.address = local;
+    context.operation = SocketOperation::Accept;
+}
+
+bool TcpAcceptAwaiter::await_ready() const noexcept
+{
+    return false;
+}
+
+bool TcpAcceptAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    context.handle = h;
+    bool done = network_stack->register_user_socket_operation(Protocol::TCP, &context);
+    return not done;
+}
+
+std::expected<TcpSocket, std::error_code> TcpAcceptAwaiter::await_resume() const noexcept
+{
+    const int fd = context.result;
+    if (fd > 0)
+    {
+        return TcpSocket(fd, local, context.address);
+    }
+    std::error_code ec(-fd, std::system_category());
     return std::unexpected(ec);
 }
 

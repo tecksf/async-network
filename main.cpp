@@ -6,7 +6,7 @@
 
 using namespace coro::net;
 
-static co_async<> start_udp_connection(std::shared_ptr<spdlog::logger> logger, std::string network_address)
+static co_async<> start_udp_echo(std::shared_ptr<spdlog::logger> logger, std::string network_address, coro::WaitGroup& group)
 {
     logger->info("Test UDP function called");
 
@@ -18,7 +18,7 @@ static co_async<> start_udp_connection(std::shared_ptr<spdlog::logger> logger, s
         co_return;
     }
 
-    logger->info("Socket bind successfully");
+    logger->info("UDP Socket bind successfully");
 
     std::vector<uint8_t> buffer;
     buffer.resize(4096);
@@ -47,13 +47,54 @@ static co_async<> start_udp_connection(std::shared_ptr<spdlog::logger> logger, s
             break;
         }
     }
+
+    group.done();
+    co_return;
+}
+
+static co_async<> start_tcp_echo(std::shared_ptr<spdlog::logger> logger, std::string network_address, coro::WaitGroup& group)
+{
+    logger->info("Test TCP function called");
+
+    std::string address = network_address + ":7891";
+    auto binder = co_await TcpListener::bind(address);
+    if (not binder.has_value())
+    {
+        logger->error("Bind {} failed: {}", address, binder.error().message());
+        co_return;
+    }
+
+    logger->info("TCP Socket bind successfully");
+
+    auto listen = std::move(binder.value());
+    while (true)
+    {
+        logger->info("TCP Socket listen...");
+        auto socket = co_await listen.accept();
+        if (not socket.has_value())
+        {
+            logger->error("Accept failed: {}", socket.error().message());
+            break;
+        }
+
+        auto client = socket.value();
+        logger->info("Accepted a new connection from {}:{}", client.get_ip_address().to_string(), client.get_port());
+    }
+
+    group.done();
+    co_return;
 }
 
 static co_async<> co_main(std::shared_ptr<spdlog::logger> logger, std::string network_address)
 {
     logger->info("co_main start");
 
-    co_await start_udp_connection(logger, network_address);
+    coro::WaitGroup group;
+    group.add(2);
+    coro::spawn(start_udp_echo(logger, network_address, group));
+    coro::spawn(start_tcp_echo(logger, network_address, group));
+
+    co_await group.wait();
     co_return;
 }
 

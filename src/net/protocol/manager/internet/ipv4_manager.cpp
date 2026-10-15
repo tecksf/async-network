@@ -91,6 +91,12 @@ co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
         context.ip = packet.get_source_ip();
         co_await trans->on_udp_segment_received(whole_inbound, context);
     }
+    else if (protocol == Protocol::TCP)
+    {
+        trans::TcpContext context;
+        context.ip = packet.get_source_ip();
+        co_await trans->on_tcp_segment_received(whole_inbound, context);
+    }
     else
     {
         logger->warn("unsupported protocol: {}", static_cast<int>(packet.get_protocol()));

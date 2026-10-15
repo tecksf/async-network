@@ -146,6 +146,7 @@ public:
     SocketBuffer& operator=(const SocketBuffer& other);
     SocketBuffer& operator=(SocketBuffer&& other) noexcept = default;
 
+    static SocketBuffer reuse_for_outbound(const SocketBuffer& inbound);
     SocketBuffer clone() const;
     SocketBufferInterface* operator->() const;
     SocketBufferInterface& operator*() const;

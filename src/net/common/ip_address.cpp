@@ -160,6 +160,11 @@ SocketAddress::SocketAddress(const IpAddress& ip, uint16_t port)
 
 SocketAddress::operator std::string() const
 {
+    return to_string();
+}
+
+std::string SocketAddress::to_string() const
+{
     return std::format("{0}:{1}", ip.to_string(), port);
 }
 

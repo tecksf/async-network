@@ -66,6 +66,7 @@ NetworkController::NetworkController(std::shared_ptr<spdlog::logger> logger)
     link_manager = std::make_unique<link::LinkManager>(this, this, this, logger);
     ipv4_manager = std::make_unique<inet::Ipv4Manager>(this, this, this, logger);
     udp_manager = std::make_unique<trans::UdpManager>(this, this, this, logger);
+    tcp_manager = std::make_unique<trans::TcpManager>(this, this, this, logger);
 }
 
 NetworkController::~NetworkController()
@@ -212,6 +213,7 @@ bool NetworkController::register_user_socket_operation(Protocol protocol, UserSo
 {
     if (protocol == Protocol::TCP)
     {
+        return tcp_manager->handle_user_socket_operation(ctx);
     }
     else if (protocol == Protocol::UDP)
     {
@@ -352,6 +354,16 @@ co_async<> NetworkController::async_send_udp_segment(const std::vector<SocketBuf
 co_async<> NetworkController::on_udp_segment_received(const SocketBuffer& inbound, const trans::UdpContext& ctx)
 {
     co_await udp_manager->on_udp_segment_received(inbound, ctx);
+}
+
+co_async<> NetworkController::on_tcp_segment_received(const SocketBuffer& inbound, const trans::TcpContext& ctx)
+{
+    co_await tcp_manager->on_tcp_segment_received(inbound, ctx);
+}
+
+co_async<> NetworkController::async_send_tcp_segment(const SocketBuffer outbounds, const trans::TcpContext ctx)
+{
+    co_await tcp_manager->async_send_tcp_segment(outbounds, ctx);
 }
 
 }

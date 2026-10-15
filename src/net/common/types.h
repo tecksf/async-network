@@ -24,6 +24,8 @@ constexpr int ARP_HEADER_SIZE = 28;
 constexpr int ETHERNET_MTU = 1480;
 constexpr int IP_V4_MTU = ETHERNET_MTU - IPv4_HEADER_SIZE;
 
+constexpr int TCP_WINDOW_SIZE = 65535;
+
 }
 
 #endif //ASYNC_NETWORK_TYPES_H

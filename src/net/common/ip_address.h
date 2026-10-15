@@ -49,6 +49,7 @@ struct SocketAddress {
     ~SocketAddress() = default;
 
     operator std::string() const;
+    std::string to_string() const;
     bool operator==(const SocketAddress& address) const;
     bool operator<(const SocketAddress& address) const;
     static std::optional<SocketAddress> from(std::string_view text);

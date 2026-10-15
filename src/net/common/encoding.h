@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <random>
 
 namespace coro::net {
 
@@ -42,6 +43,14 @@ protected:
     uint32_t result = 0;
     std::optional<uint8_t> pending = std::nullopt;
 };
+
+template <std::unsigned_integral Uint>
+Uint rand_uint()
+{
+    static std::mt19937_64 engine{std::random_device{}()};
+    static std::uniform_int_distribution<uint64_t> dist;
+    return static_cast<Uint>(dist(engine));
+}
 
 }
 

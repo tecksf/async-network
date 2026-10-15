@@ -4,6 +4,7 @@
 #include "protocol/manager/link_manager.h"
 #include "protocol/manager/internet/ipv4_manager.h"
 #include "protocol/manager/transport/udp_manager.h"
+#include "protocol/manager/transport/tcp_manager.h"
 #include "network_interface.h"
 #include <socket/socket.h>
 #include <common/types.h>
@@ -49,6 +50,8 @@ public:
     co_async<> async_send_ipv4_packet(const std::vector<SocketBuffer> outbounds, const inet::Ipv4Context ctx) override;
     co_async<> async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const trans::UdpContext ctx) override;
     co_async<> on_udp_segment_received(const SocketBuffer& inbound, const trans::UdpContext& ctx) override;
+    co_async<> on_tcp_segment_received(const SocketBuffer& inbound, const trans::TcpContext& ctx) override;
+    co_async<> async_send_tcp_segment(const SocketBuffer outbound, const trans::TcpContext ctx) override;
 
 private:
     using Block = uint8_t [MAX_BLOCK_SIZE];
@@ -69,6 +72,7 @@ private:
     std::unique_ptr<link::LinkManager> link_manager;
     std::unique_ptr<inet::Ipv4Manager> ipv4_manager;
     std::unique_ptr<trans::UdpManager> udp_manager;
+    std::unique_ptr<trans::TcpManager> tcp_manager;
 };
 
 }
