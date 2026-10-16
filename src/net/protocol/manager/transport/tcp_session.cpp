@@ -1,21 +1,23 @@
 #include "tcp_session.h"
 #include "tcp_manager.h"
+#include <cerrno>
 #include <async/coro.h>
 #include <protocol/header/tcp.hpp>
 
 namespace coro::net::trans {
 
 
-TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local)
+TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local, const SocketAddress& remote)
     : app(manager->get_app()), trans(manager->get_trans()), logger(manager->get_logger()),
       manager(manager),
       session_events(manager),
       session_id(rand_uint<uint32_t>()),
       socket_fd(app->allocate_fd()),
-      local(local)
+      local(local),
+      remote(remote)
 {
     state = s;
-    logger->debug("===> TCP session [{0}] created， State: {1}", session_id, get_state_name(s));
+    logger->debug("===> TCP session [{0}] created, State: {1}", session_id, get_state_name(s));
 }
 
 TcpSession::~TcpSession()
@@ -23,44 +25,45 @@ TcpSession::~TcpSession()
     logger->debug("===> TCP session [{0}] destroyed", session_id);
 }
 
-TcpSession::TcpSession(const TcpSession& session)
+TcpSession::TcpSession(const TcpSession& session, const SocketAddress& remote)
     : session_events(session.session_events),
       session_id(rand_uint<uint32_t>()),
       socket_fd(session.app->allocate_fd()),
-      local(session.local)
+      local(session.local),
+      remote(remote)
 {
     app = session.app;
     trans = session.trans;
     logger = session.logger;
     manager = session.manager;
-    state = session.state;
+    state.store(session.state.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
-    remote = session.remote;
     sequence_number = session.sequence_number;
     ack_number = session.ack_number;
     finish_sequence = session.finish_sequence;
 
-    logger->debug("===> TCP session [{0}] created， State: {1}", session_id, get_state_name(state));
+    logger->debug("===> TCP session [{0}] created, State: {1}", session_id, get_state_name(state));
 }
 
 TcpState TcpSession::get_state() const
 {
-    return state;
+    return state.load(std::memory_order_acquire);
 }
 
 bool TcpSession::is_connected() const
 {
-    return state == TcpState::Established;
+    return state.load(std::memory_order_acquire) == TcpState::Established;
 }
 
 bool TcpSession::is_writable() const
 {
-    return state == TcpState::Established || state == TcpState::CloseWait;
+    const TcpState current = state.load(std::memory_order_acquire);
+    return current == TcpState::Established || current == TcpState::CloseWait;
 }
 
 bool TcpSession::is_closed() const
 {
-    return state == TcpState::Closed;
+    return state.load(std::memory_order_acquire) == TcpState::Closed;
 }
 
 int TcpSession::get_socket_fd() const
@@ -70,7 +73,7 @@ int TcpSession::get_socket_fd() const
 
 std::string_view TcpSession::get_string_state() const
 {
-    return get_state_name(state);
+    return get_state_name(state.load(std::memory_order_acquire));
 }
 
 SocketAddress TcpSession::get_local_address() const
@@ -90,8 +93,11 @@ TcpSocketHandle TcpSession::get_socket_handle() const
 
 void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
 {
-    TcpState next_state = state;
-    switch (state)
+    std::lock_guard lock(session_mutex);
+
+    const TcpState current = state.load(std::memory_order_relaxed);
+    TcpState next_state = current;
+    switch (current)
     {
         case TcpState::Listen:
             next_state = process_tcp_segment_in_listen_state(header, payload);
@@ -135,13 +141,13 @@ void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffe
 
 void TcpSession::switch_to(TcpState next_state)
 {
-    TcpState prev_state = state;
+    const TcpState prev_state = state.load(std::memory_order_relaxed);
     if (prev_state == next_state)
     {
         return;
     }
 
-    state = next_state;
+    state.store(next_state, std::memory_order_release);
     logger->debug("===> TCP session [{0}] State change: {1} --> {2}", session_id, get_state_name(prev_state), get_state_name(next_state));
 
     notify_state_update(prev_state, next_state);
@@ -387,12 +393,24 @@ void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uin
     app->sumit_task(trans->async_send_tcp_segment(outbound, context));
 }
 
-void TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
+int TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
 {
+    std::lock_guard lock(session_mutex);
+
+    if (not is_writable())
+    {
+        logger->warn("{} session not writable, will ignore...", get_string_state());
+        return -ENOTCONN;
+    }
+
+    int bytes_sent = 0;
     for (auto payload: payloads)
     {
+        bytes_sent += static_cast<int>(payload->size());
         send_tcp_segment(payload, TcpSegment::FLAG_ACK | TcpSegment::FLAG_PSH);
     }
+
+    return bytes_sent;
 }
 
 void TcpSession::start_time_wait_timer()
@@ -417,20 +435,23 @@ co_async<> TcpSession::time_wait_timer(std::shared_ptr<std::atomic_bool> cancell
         co_return;
     }
 
-    // todo: not safe in multi threads
+    std::lock_guard lock(session_mutex);
     switch_to(TcpState::Closed);
 }
 
 void TcpSession::close()
 {
+    std::lock_guard lock(session_mutex);
+
     auto send_fin_segment = [this]() {
         auto outbound = app->allocate_socket_buffer();
         send_tcp_segment(outbound, TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK);
         sequence_number += 1;
     };
 
-    TcpState next_state = state;
-    switch (state)
+    const TcpState current = state.load(std::memory_order_relaxed);
+    TcpState next_state = current;
+    switch (current)
     {
         case TcpState::Listen:
             next_state = TcpState::Closed;

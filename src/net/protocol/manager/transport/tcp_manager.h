@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <spdlog/spdlog.h>
 #include <common/socket_buffer.h>
@@ -24,7 +25,7 @@ public:
     void on_session_closed(TcpState prev_state, const TcpSocketHandle& handle) override;
 
     co_async<> on_tcp_segment_received(const SocketBuffer& inbound, const TcpContext& ctx);
-    co_async<> async_send_tcp_segment(const SocketBuffer outbound, const TcpContext ctx);
+    co_async<> async_send_tcp_segment(const SocketBuffer outbound, const TcpContext ctx) const;
     std::shared_ptr<spdlog::logger> get_logger() const;
     app::ApplicationService* get_app() const;
     trans::TransportService* get_trans() const;
@@ -34,13 +35,17 @@ private:
     std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data) const;
     void add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session);
 
+    std::shared_ptr<TcpSession> find_session_by_fd(int fd) const;
+    std::shared_ptr<TcpConnectSession> find_connection_session(const TcpSocketHandle& handle) const;
+    std::shared_ptr<TcpListenSession> find_listen_session(const SocketAddress& local) const;
+
 private:
     app::ApplicationService* app;
     trans::TransportService* trans;
     inet::InternetService* inet;
     std::shared_ptr<spdlog::logger> logger;
 
-    std::recursive_mutex socket_mutex;
+    mutable std::shared_mutex socket_mutex;
     std::map<int, std::shared_ptr<TcpSession>> sockets;
     std::map<TcpSocketHandle, std::shared_ptr<TcpConnectSession>> connection_sessions;
     std::map<SocketAddress, std::shared_ptr<TcpListenSession>> listen_sessions;

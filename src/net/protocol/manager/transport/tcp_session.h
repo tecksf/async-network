@@ -1,9 +1,12 @@
 #ifndef ASYNC_NETWORK_TCP_SESSION_H
 #define ASYNC_NETWORK_TCP_SESSION_H
 
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <deque>
+#include <memory>
+#include <mutex>
 #include <spdlog/spdlog.h>
 #include <protocol/capability/application.h>
 #include <protocol/capability/transport.h>
@@ -11,6 +14,8 @@
 #include "protocol/header/tcp.hpp"
 
 namespace coro::net::trans {
+
+#define TCP_LOCK_REQUIRED
 
 class TcpManager;
 class TcpSegment;
@@ -52,29 +57,30 @@ public:
 
 class TcpSession {
 public:
-    TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local);
-    TcpSession(const TcpSession& session);
+    TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local, const SocketAddress& remote);
+    TcpSession(const TcpSession& session, const SocketAddress& remote);
     virtual ~TcpSession();
-    TcpState get_state() const;
     bool is_connected() const;
     bool is_closed() const;
-    int get_socket_fd() const;
     bool is_writable() const;
+    int get_socket_fd() const;
+    TcpState get_state() const;
     std::string_view get_string_state() const;
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
     TcpSocketHandle get_socket_handle() const;
+
     void process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
-    void send_user_data(const std::vector<SocketBuffer>& payloads);
-    virtual void add_waiter(UserSocketContext* ctx) = 0;
+    int send_user_data(const std::vector<SocketBuffer>& payloads);
     void close();
+    virtual void add_waiter(UserSocketContext* ctx) = 0;
 
 protected:
-    void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
-    void switch_to(TcpState next_state);
+    TCP_LOCK_REQUIRED void switch_to(TcpState next_state);
+    TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
+    TCP_LOCK_REQUIRED void start_time_wait_timer();
     virtual void notify_state_update(TcpState prev, TcpState next) const {}
     co_async<> time_wait_timer(std::shared_ptr<std::atomic_bool> cancelled);
-    void start_time_wait_timer();
 
 protected:
     TcpState process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload);
@@ -98,15 +104,15 @@ protected:
     std::shared_ptr<spdlog::logger> logger;
     TcpManager* manager;
     TcpSessionEvent* session_events;
-
     const uint32_t session_id;
     const int socket_fd;
-    TcpState state;
+    const SocketAddress local;
+    const SocketAddress remote;
+    std::atomic<TcpState> state;
+
+    std::mutex session_mutex;
     uint32_t sequence_number;
     uint32_t ack_number;
-
-    const SocketAddress local;
-    SocketAddress remote;
 
     std::optional<uint32_t> finish_sequence;
     std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
@@ -115,65 +121,65 @@ protected:
 class TcpConnectSession : public TcpSession, public std::enable_shared_from_this<TcpConnectSession> {
 public:
     TcpConnectSession(TcpManager* manager, TcpState s, const TcpSocketHandle& handle)
-        : TcpSession(manager, s, handle.local)
+        : TcpSession(manager, s, handle.local, handle.remote)
     {
-        remote = handle.remote;
-
         if (state == TcpState::SynSent)
         {
+            std::lock_guard lock(session_mutex);
             sequence_number = rand_uint<uint32_t>() & 0xffff;
             auto outbound = app->allocate_socket_buffer();
             send_tcp_segment(outbound, TcpSegment::FLAG_SYN);
         }
     }
 
-    explicit TcpConnectSession(const TcpSession& session, const SocketAddress& client)
-        : TcpSession(session)
+    explicit TcpConnectSession(const TcpSession& session, const SocketAddress& remote)
+        : TcpSession(session, remote)
     {
-        remote = client;
     }
 
     ~TcpConnectSession() override = default;
 
-    UserSocketContext* process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
+    UserSocketContext* take_waiter()
     {
-        UserSocketContext* w = nullptr;
-
-        TcpState prev = state;
-        TcpSession::process_tcp_segment(header, payload);
-
-        // connect waiter, waiter should not be nullptr
-        if (prev != state && state == TcpState::Established)
-        {
-            std::swap(waiter, w);
-        }
-
-        return w;
+        return waiter.exchange(nullptr, std::memory_order_acq_rel);
     }
 
     void add_waiter(UserSocketContext* ctx) override
     {
-        if (ctx && waiter == nullptr)
+        if (ctx == nullptr)
         {
-            waiter = ctx;
+            return;
         }
+
+        UserSocketContext* expected = nullptr;
+        waiter.compare_exchange_strong(expected, ctx, std::memory_order_acq_rel);
     }
 
 private:
-    UserSocketContext* waiter = nullptr;
+    std::atomic<UserSocketContext*> waiter = nullptr;
 };
 
 
 class TcpListenSession : public TcpSession {
 public:
     explicit TcpListenSession(TcpManager* manager, const SocketAddress& local)
-        : TcpSession(manager, TcpState::Listen, local)
+        : TcpSession(manager, TcpState::Listen, local, SocketAddress{})
     {
     }
 
     ~TcpListenSession() override
     {
-        for (auto& [_, session]: accept_queue)
+        std::vector<std::shared_ptr<TcpConnectSession>> sessions; {
+            std::lock_guard lock(accept_mutex);
+            for (auto& [_, session]: accept_queue)
+            {
+                sessions.push_back(session);
+            }
+            accept_queue.clear();
+            accept_waiters.clear();
+        }
+
+        for (auto& session: sessions)
         {
             session->close();
         }
@@ -181,31 +187,35 @@ public:
 
     std::shared_ptr<TcpConnectSession> accept_client()
     {
-        std::shared_ptr<TcpConnectSession> session = nullptr;
+        std::lock_guard lock(accept_mutex);
         for (auto iter = accept_queue.begin(); iter != accept_queue.end(); ++iter)
         {
             if (iter->second->is_connected())
             {
-                session = iter->second;
+                auto session = iter->second;
                 accept_queue.erase(iter);
-                break;
+                return session;
             }
         }
 
-        return session;
+        return nullptr;
     }
 
     void remove_accept_session(const SocketAddress& client)
     {
+        std::lock_guard lock(accept_mutex);
         accept_queue.erase(client);
     }
 
     void add_waiter(UserSocketContext* ctx) override
     {
-        if (ctx != nullptr)
+        if (ctx == nullptr)
         {
-            accept_waiters.push_back(ctx);
+            return;
         }
+
+        std::lock_guard lock(accept_mutex);
+        accept_waiters.push_back(ctx);
     }
 
     std::pair<std::shared_ptr<TcpConnectSession>, UserSocketContext*>
@@ -215,26 +225,40 @@ public:
         {
             auto new_session = std::make_shared<TcpConnectSession>(*this, client);
             new_session->process_tcp_segment(header, payload);
-            accept_queue.emplace(client, new_session);
-        }
-        else if (auto it = accept_queue.find(client); it != accept_queue.end())
-        {
-            auto client_session = it->second;
-            client_session->process_tcp_segment(header, payload);
 
-            if (client_session->is_connected() && not accept_waiters.empty())
+            std::lock_guard lock(accept_mutex);
+            accept_queue.emplace(client, new_session);
+            return std::pair(nullptr, nullptr);
+        }
+
+        std::shared_ptr<TcpConnectSession> client_session;
+        //
+        {
+            std::lock_guard lock(accept_mutex);
+            auto it = accept_queue.find(client);
+            if (it == accept_queue.end())
             {
-                auto w = accept_waiters.front();
-                accept_waiters.pop_front();
-                accept_queue.erase(it);
-                return std::pair{client_session, w};
+                return std::pair(nullptr, nullptr);
             }
+            client_session = it->second;
+        }
+
+        client_session->process_tcp_segment(header, payload);
+
+        std::lock_guard lock(accept_mutex);
+        if (client_session->is_connected() && not accept_waiters.empty())
+        {
+            auto w = accept_waiters.front();
+            accept_waiters.pop_front();
+            accept_queue.erase(client);
+            return std::pair{client_session, w};
         }
 
         return std::pair(nullptr, nullptr);
     }
 
 private:
+    std::mutex accept_mutex;
     std::map<SocketAddress, std::shared_ptr<TcpConnectSession>> accept_queue;
     std::deque<UserSocketContext*> accept_waiters;
 };

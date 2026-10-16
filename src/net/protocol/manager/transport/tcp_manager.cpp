@@ -43,27 +43,31 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     handle.local = {inet->get_host_ip(), header.get_destination_port()};
     handle.remote = {ctx.ip, header.get_source_port()};
 
-    std::lock_guard lock(socket_mutex);
-    if (auto conn = connection_sessions.find(handle); conn != connection_sessions.end())
+    if (auto conn_session = find_connection_session(handle))
     {
-        auto conn_session = conn->second;
-        if (auto waiter = conn_session->process_tcp_segment(header, payload))
+        conn_session->process_tcp_segment(header, payload);
+        if (conn_session->is_connected())
         {
-            if (waiter->operation == SocketOperation::Connect)
+            if (auto waiter = conn_session->take_waiter())
             {
-                waiter->address = handle.remote;
-                waiter->result = conn_session->get_socket_fd();
-            }
-            else if (waiter->operation == SocketOperation::Read)
-            {
-            }
+                if (waiter->operation == SocketOperation::Connect)
+                {
+                    waiter->address = handle.remote;
+                    waiter->result = conn_session->get_socket_fd();
+                }
+                else if (waiter->operation == SocketOperation::Read)
+                {
+                }
 
-            app->notify_user(waiter->handle);
+                app->notify_user(waiter->handle);
+            }
         }
+
+        co_return;
     }
-    else if (auto listen = listen_sessions.find(handle.local); listen != listen_sessions.end())
+
+    if (auto listen_session = find_listen_session(handle.local))
     {
-        auto listen_session = listen->second;
         auto [conn_session, waiter] = listen_session->process_tcp_segment(header, payload, handle.remote);
         if (conn_session && waiter)
         {
@@ -76,7 +80,7 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     }
 }
 
-co_async<> TcpManager::async_send_tcp_segment(const SocketBuffer outbound, const TcpContext ctx)
+co_async<> TcpManager::async_send_tcp_segment(const SocketBuffer outbound, const TcpContext ctx) const
 {
     inet::Ipv4Context context;
     context.protocol = Protocol::TCP;
@@ -90,15 +94,16 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
 
     do
     {
-        std::lock_guard lock(socket_mutex);
         if (ctx->operation == SocketOperation::Bind)
         {
-            auto [it, succeed] = listen_sessions.try_emplace(ctx->address, std::make_shared<TcpListenSession>(this, ctx->address));
+            auto new_listen_session = std::make_shared<TcpListenSession>(this, ctx->address);
+
+            std::unique_lock lock(socket_mutex);
+            auto [it, succeed] = listen_sessions.try_emplace(ctx->address, new_listen_session);
             if (succeed)
             {
-                auto listen_session = it->second;
-                ctx->result = listen_session->get_socket_fd();
-                sockets.emplace(ctx->result, listen_session);
+                ctx->result = it->second->get_socket_fd();
+                sockets.emplace(ctx->result, it->second);
             }
             else
             {
@@ -107,9 +112,9 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
         }
         else if (ctx->operation == SocketOperation::Accept)
         {
-            if (auto it = listen_sessions.find(ctx->address); it != listen_sessions.end())
+            auto listen_session = find_listen_session(ctx->address);
+            if (listen_session)
             {
-                auto listen_session = it->second;
                 if (listen_session->get_socket_fd() != ctx->fd)
                 {
                     ctx->result = -EBADF;
@@ -120,8 +125,7 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
                 {
                     ctx->address = client_session->get_remote_address();
                     ctx->result = client_session->get_socket_fd();
-                    connection_sessions.emplace(client_session->get_socket_handle(), client_session);
-                    sockets.emplace(ctx->result, client_session);
+                    add_new_connection_session(client_session);
                     break;
                 }
 
@@ -131,28 +135,25 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
         }
         else if (ctx->operation == SocketOperation::Write)
         {
-            auto it = sockets.find(ctx->fd);
-            if (it == sockets.end())
+            auto session = find_session_by_fd(ctx->fd);
+            if (not session)
             {
                 ctx->result = -EBADF;
                 break;
             }
 
-            auto session = it->second;
             if (not session->is_writable())
             {
                 ctx->result = -ENOTCONN;
                 break;
             }
 
-            session->send_user_data(copy_user_data_to_buffer(ctx->data));
-            ctx->result = static_cast<int>(ctx->data.size());
+            ctx->result = session->send_user_data(copy_user_data_to_buffer(ctx->data));;
         }
         else if (ctx->operation == SocketOperation::Close)
         {
-            if (auto it = sockets.find(ctx->fd); it != sockets.end())
+            if (auto session = find_session_by_fd(ctx->fd))
             {
-                auto session = it->second;
                 session->close();
                 ctx->result = 0;
             }
@@ -164,34 +165,30 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
 
 void TcpManager::on_session_closed(TcpState prev_state, const TcpSocketHandle& handle)
 {
-    do
+    if (prev_state == TcpState::Listen)
     {
-        std::lock_guard lock(socket_mutex);
-        if (prev_state == TcpState::Listen)
+        std::unique_lock lock(socket_mutex);
+        if (auto node = listen_sessions.extract(handle.local))
         {
-            if (auto node = listen_sessions.extract(handle.local))
-            {
-                auto session = node.mapped();
-                sockets.erase(session->get_socket_fd());
-            }
-            break;
+            sockets.erase(node.mapped()->get_socket_fd());
         }
+        return;
+    }
 
-        if (prev_state != TcpState::SynReceived)
+    if (prev_state != TcpState::SynReceived)
+    {
+        std::unique_lock lock(socket_mutex);
+        if (auto node = connection_sessions.extract(handle))
         {
-            if (auto node = connection_sessions.extract(handle))
-            {
-                auto session = node.mapped();
-                sockets.erase(session->get_socket_fd());
-                break;
-            }
+            sockets.erase(node.mapped()->get_socket_fd());
+            return;
         }
+    }
 
-        if (auto it = listen_sessions.find(handle.local); it != listen_sessions.end())
-        {
-            it->second->remove_accept_session(handle.remote);
-        }
-    } while (false);
+    if (auto listen_session = find_listen_session(handle.local))
+    {
+        listen_session->remove_accept_session(handle.remote);
+    }
 }
 
 std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data) const
@@ -216,8 +213,42 @@ std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t
 
 void TcpManager::add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session)
 {
+    std::unique_lock lock(socket_mutex);
     connection_sessions.emplace(session->get_socket_handle(), session);
     sockets.emplace(session->get_socket_fd(), session);
+}
+
+std::shared_ptr<TcpSession> TcpManager::find_session_by_fd(int fd) const
+{
+    std::shared_lock lock(socket_mutex);
+    if (auto it = sockets.find(fd); it != sockets.end())
+    {
+        return it->second;
+    }
+
+    return nullptr;
+}
+
+std::shared_ptr<TcpConnectSession> TcpManager::find_connection_session(const TcpSocketHandle& handle) const
+{
+    std::shared_lock lock(socket_mutex);
+    if (auto it = connection_sessions.find(handle); it != connection_sessions.end())
+    {
+        return it->second;
+    }
+
+    return nullptr;
+}
+
+std::shared_ptr<TcpListenSession> TcpManager::find_listen_session(const SocketAddress& local) const
+{
+    std::shared_lock lock(socket_mutex);
+    if (auto it = listen_sessions.find(local); it != listen_sessions.end())
+    {
+        return it->second;
+    }
+
+    return nullptr;
 }
 
 std::shared_ptr<spdlog::logger> TcpManager::get_logger() const
