@@ -1,6 +1,5 @@
 #include "tcp_session.h"
 #include "tcp_manager.h"
-#include <cerrno>
 #include <async/coro.h>
 #include <protocol/header/tcp.hpp>
 
@@ -14,7 +13,8 @@ TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& loc
       session_id(rand_uint<uint32_t>()),
       socket_fd(app->allocate_fd()),
       local(local),
-      remote(remote)
+      remote(remote),
+      send_window(manager->get_app(), manager->get_trans(), this, remote.ip, logger)
 {
     state = s;
     logger->debug("===> TCP session [{0}] created, State: {1}", session_id, get_state_name(s));
@@ -30,7 +30,8 @@ TcpSession::TcpSession(const TcpSession& session, const SocketAddress& remote)
       session_id(rand_uint<uint32_t>()),
       socket_fd(session.app->allocate_fd()),
       local(session.local),
-      remote(remote)
+      remote(remote),
+      send_window(session.app, session.trans, this, remote.ip, session.logger)
 {
     app = session.app;
     trans = session.trans;
@@ -94,6 +95,11 @@ TcpSocketHandle TcpSession::get_socket_handle() const
 void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
 {
     std::lock_guard lock(session_mutex);
+
+    if (header.is_ack())
+    {
+        send_window.acknowledge(header.get_ack_number());
+    }
 
     const TcpState current = state.load(std::memory_order_relaxed);
     TcpState next_state = current;
@@ -388,10 +394,7 @@ void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uin
 
     sequence_number += payload->size();
 
-    TcpContext context;
-    context.ip = remote.ip;
-    context.protocol = Protocol::TCP;
-    app->sumit_task(trans->async_send_tcp_segment(outbound, context));
+    send_window.push_outbound(segment, outbound);
 }
 
 int TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
@@ -438,6 +441,12 @@ co_async<> TcpSession::time_wait_timer(std::shared_ptr<std::atomic_bool> cancell
 
     std::lock_guard lock(session_mutex);
     switch_to(TcpState::Closed);
+}
+
+void TcpSession::on_retransmission_failed()
+{
+    logger->error("===> TCP session [{0}] segment retransmission failed on remote port {1}, closing session", session_id, remote.port);
+    close();
 }
 
 void TcpSession::close()

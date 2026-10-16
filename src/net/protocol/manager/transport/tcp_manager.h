@@ -1,12 +1,9 @@
 #ifndef ASYNC_NETWORK_TCP_MANAGER_H
 #define ASYNC_NETWORK_TCP_MANAGER_H
 
-#include <atomic>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <shared_mutex>
-#include <thread>
 #include <spdlog/spdlog.h>
 #include <common/socket_buffer.h>
 #include <protocol/capability/application.h>

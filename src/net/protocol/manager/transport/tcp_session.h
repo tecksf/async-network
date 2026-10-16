@@ -12,6 +12,7 @@
 #include <protocol/capability/transport.h>
 #include <socket/socket.h>
 #include "protocol/header/tcp.hpp"
+#include "tcp_send_window.h"
 
 namespace coro::net::trans {
 
@@ -55,7 +56,7 @@ public:
     virtual void on_session_closed(TcpState prev_state, const TcpSocketHandle& handle) = 0;
 };
 
-class TcpSession {
+class TcpSession : public TcpSendEvents  {
 public:
     TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local, const SocketAddress& remote);
     TcpSession(const TcpSession& session, const SocketAddress& remote);
@@ -81,6 +82,7 @@ protected:
     TCP_LOCK_REQUIRED void start_time_wait_timer();
     virtual void notify_state_update(TcpState prev, TcpState next) const {}
     co_async<> time_wait_timer(std::shared_ptr<std::atomic_bool> cancelled);
+    void on_retransmission_failed() override;
 
 protected:
     TcpState process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload);
@@ -116,6 +118,7 @@ protected:
 
     std::optional<uint32_t> finish_sequence;
     std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
+    TcpSendWindow send_window;
 };
 
 class TcpConnectSession : public TcpSession, public std::enable_shared_from_this<TcpConnectSession> {
