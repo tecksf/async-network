@@ -46,27 +46,9 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     if (auto conn_session = find_connection_session(handle))
     {
         conn_session->process_tcp_segment(header, payload);
-        if (conn_session->is_connected())
-        {
-            if (auto waiter = conn_session->take_waiter())
-            {
-                if (waiter->operation == SocketOperation::Connect)
-                {
-                    waiter->address = handle.local;
-                    waiter->result = conn_session->get_socket_fd();
-                }
-                else if (waiter->operation == SocketOperation::Read)
-                {
-                }
-
-                app->notify_user(waiter->handle);
-            }
-        }
-
-        co_return;
+        handle_tcp_data_from_network(conn_session);
     }
-
-    if (auto listen_session = find_listen_session(handle.local))
+    else if (auto listen_session = find_listen_session(handle.local))
     {
         auto [conn_session, waiter] = listen_session->process_tcp_segment(header, payload, handle.remote);
         if (conn_session && waiter)
@@ -86,6 +68,49 @@ co_async<> TcpManager::async_send_tcp_segment(const SocketBuffer outbound, const
     context.protocol = Protocol::TCP;
     context.destination = ctx.ip;
     co_await inet->async_send_ipv4_packet(outbound, context);
+}
+
+
+void TcpManager::handle_tcp_data_from_network(const std::shared_ptr<TcpConnectSession>& session)
+{
+    auto waiter = session->take_waiter();
+    if (waiter == nullptr)
+    {
+        return;
+    }
+
+    if (waiter->operation == SocketOperation::Connect)
+    {
+        if (session->is_connected())
+        {
+            waiter->address = session->get_local_address();
+            waiter->result = session->get_socket_fd();
+            app->notify_user(waiter->handle);
+            return;
+        }
+    }
+
+    if (waiter->operation == SocketOperation::Read)
+    {
+        if (session->has_readable_data())
+        {
+            size_t count = session->read_into(waiter->data);
+            if (count > 0)
+            {
+                waiter->result = count;
+                app->notify_user(waiter->handle);
+                return;
+            }
+        }
+        else if (session->is_eof())
+        {
+            waiter->result = 0;
+            app->notify_user(waiter->handle);
+            return;
+        }
+    }
+
+    session->add_waiter(waiter);
 }
 
 bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
@@ -175,6 +200,40 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
             }
 
             ctx->result = session->send_user_data(copy_user_data_to_buffer(ctx->data));;
+        }
+        else if (ctx->operation == SocketOperation::Read)
+        {
+            auto session = find_session_by_fd(ctx->fd);
+            if (not session)
+            {
+                ctx->result = -EBADF;
+                break;
+            }
+
+            if (not session->is_readable())
+            {
+                ctx->result = -ENOTCONN;
+                break;
+            }
+
+            if (session->has_readable_data())
+            {
+                size_t count = session->read_into(ctx->data);
+                if (count > 0)
+                {
+                    ctx->result = count;
+                    break;
+                }
+            }
+
+            if (session->is_eof())
+            {
+                ctx->result = 0;
+                break;
+            }
+
+            done = false;
+            session->add_waiter(ctx);
         }
         else if (ctx->operation == SocketOperation::Close)
         {

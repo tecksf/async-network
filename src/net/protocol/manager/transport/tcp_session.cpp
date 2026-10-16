@@ -14,7 +14,8 @@ TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& loc
       socket_fd(app->allocate_fd()),
       local(local),
       remote(remote),
-      send_window(manager->get_app(), manager->get_trans(), this, remote.ip, logger)
+      send_window(manager->get_app(), manager->get_trans(), this, remote.ip, logger),
+      receive_window(manager->get_app(), manager->get_trans(), logger)
 {
     state = s;
     logger->debug("===> TCP session [{0}] created, State: {1}", session_id, get_state_name(s));
@@ -23,27 +24,6 @@ TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& loc
 TcpSession::~TcpSession()
 {
     logger->debug("===> TCP session [{0}] destroyed", session_id);
-}
-
-TcpSession::TcpSession(const TcpSession& session, const SocketAddress& remote)
-    : session_events(session.session_events),
-      session_id(rand_uint<uint32_t>()),
-      socket_fd(session.app->allocate_fd()),
-      local(session.local),
-      remote(remote),
-      send_window(session.app, session.trans, this, remote.ip, session.logger)
-{
-    app = session.app;
-    trans = session.trans;
-    logger = session.logger;
-    manager = session.manager;
-    state.store(session.state.load(std::memory_order_relaxed), std::memory_order_relaxed);
-
-    sequence_number = session.sequence_number;
-    ack_number = session.ack_number;
-    finish_sequence = session.finish_sequence;
-
-    logger->debug("===> TCP session [{0}] created, State: {1}", session_id, get_state_name(state));
 }
 
 TcpState TcpSession::get_state() const
@@ -60,6 +40,31 @@ bool TcpSession::is_writable() const
 {
     const TcpState current = state.load(std::memory_order_acquire);
     return current == TcpState::Established || current == TcpState::CloseWait;
+}
+
+bool TcpSession::is_readable() const
+{
+    const TcpState current = state.load(std::memory_order_acquire);
+    return current == TcpState::Established || current == TcpState::FinWait1 || current == TcpState::FinWait2 || current ==
+           TcpState::CloseWait;
+}
+
+bool TcpSession::has_readable_data() const
+{
+    std::lock_guard lock(session_mutex);
+    return receive_window.has_readable_data();
+}
+
+bool TcpSession::is_eof() const
+{
+    std::lock_guard lock(session_mutex);
+    return receive_window.is_eof();
+}
+
+size_t TcpSession::read_into(std::span<uint8_t> out)
+{
+    std::lock_guard lock(session_mutex);
+    return receive_window.read_into(out);
 }
 
 bool TcpSession::is_closed() const
@@ -177,7 +182,7 @@ TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& heade
     }
 
     uint32_t seq = header.get_sequence_number();
-    ack_number = seq + 1;
+    receive_window.set_next_expected_sequence(seq + 1);
     sequence_number = rand_uint<uint32_t>() & 0xffff;
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
@@ -198,13 +203,11 @@ TcpState TcpSession::process_tcp_segment_in_syn_received_state(const TcpSegment&
 
     uint32_t ack = header.get_ack_number();
     uint32_t seq = header.get_sequence_number();
-    if (ack != sequence_number || seq != ack_number)
+    if (ack != sequence_number || seq != receive_window.get_next_expected_sequence())
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
         return state;
     }
-
-    ack_number += payload->size();
 
     return TcpState::Established;
 }
@@ -225,7 +228,7 @@ TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& hea
         return state;
     }
 
-    ack_number = seq + 1;
+    receive_window.set_next_expected_sequence(seq + 1);
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
@@ -235,31 +238,26 @@ TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& hea
 
 TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& header, const SocketBuffer& payload)
 {
-    uint32_t ack = header.get_ack_number();
     uint32_t seq = header.get_sequence_number();
+    uint32_t payload_size = payload->size();
+    TcpState next_state = state;
 
-    if (ack != sequence_number || seq != ack_number)
+    if (header.contains(TcpSegment::FLAG_PSH))
     {
-        logger->warn("{} invalid ack number: {}", get_string_state(), ack);
-        return state;
+        receive_user_data(header, payload);
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
     {
-        ack_number += 1;
-        auto fin_seq = seq + payload->size();
-        finish_sequence = fin_seq;
+        auto fin_seq = seq + payload_size;
+        receive_window.acknowledge_finish_sequence(fin_seq);
+        next_state = TcpState::CloseWait;
     }
 
     auto outbound = app->allocate_socket_buffer();
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
 
-    if (finish_sequence.has_value() and finish_sequence.value() + 1 == ack_number)
-    {
-        return TcpState::CloseWait;
-    }
-
-    return state;
+    return next_state;
 }
 
 TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload)
@@ -267,7 +265,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
     uint32_t ack = header.get_ack_number();
     uint32_t seq = header.get_sequence_number();
 
-    if (ack != sequence_number || seq != ack_number)
+    if (ack != sequence_number)
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
         return state;
@@ -277,14 +275,14 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
 
     if (header.contains(TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK))
     {
-        ack_number += 1;
+        receive_window.acknowledge_finish_sequence(seq);
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
         return TcpState::TimeWait;
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
     {
-        ack_number += 1;
+        receive_window.acknowledge_finish_sequence(seq);
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
         return TcpState::Closing;
     }
@@ -306,7 +304,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
         return state;
     }
 
-    ack_number += 1;
+    receive_window.acknowledge_finish_sequence(header.get_sequence_number());
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
@@ -380,7 +378,7 @@ void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uin
     segment.set_source_port(local.port);
     segment.set_destination_port(remote.port);
     segment.set_sequence_number(sequence_number);
-    segment.set_ack_number(ack_number);
+    segment.set_ack_number(receive_window.get_next_expected_sequence());
     segment.set_flag(flag);
     segment.set_header_len(TcpSegment::HeaderSize);
     segment.set_window_size(window_size);
@@ -415,6 +413,11 @@ int TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
     }
 
     return bytes_sent;
+}
+
+void TcpSession::receive_user_data(const TcpSegment& header, const SocketBuffer& payload)
+{
+    receive_window.reassemble(header.get_sequence_number(), payload);
 }
 
 void TcpSession::start_time_wait_timer()

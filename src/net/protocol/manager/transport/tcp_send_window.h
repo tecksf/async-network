@@ -64,7 +64,7 @@ private:
 
     uint32_t usable_window() const
     {
-        return window_size - bytes_in_flight();
+        return TCP_WINDOW_SIZE - bytes_in_flight();
     }
 
     static constexpr int MaxRetransmissions = 15;
@@ -87,7 +87,6 @@ private:
     const IpAddress destination_ip;
     TcpSendEvents* events;
 
-    uint32_t window_size = 65535;
     uint32_t unacknowledged = 0;
     uint32_t next_sequence = 0;
     bool initialized = false;

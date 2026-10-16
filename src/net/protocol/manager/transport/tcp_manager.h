@@ -31,6 +31,7 @@ public:
 private:
     std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data) const;
     void add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session);
+    void handle_tcp_data_from_network(const std::shared_ptr<TcpConnectSession>& session);
 
     std::shared_ptr<TcpSession> find_session_by_fd(int fd) const;
     std::shared_ptr<TcpConnectSession> find_connection_session(const TcpSocketHandle& handle) const;

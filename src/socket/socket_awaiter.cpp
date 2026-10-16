@@ -315,7 +315,7 @@ bool TcpReadAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 std::expected<int, std::error_code> TcpReadAwaiter::await_resume() const noexcept
 {
     const int res = context.result;
-    if (res > 0)
+    if (res >= 0)
     {
         return res;
     }

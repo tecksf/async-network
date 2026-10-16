@@ -7,12 +7,14 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <spdlog/spdlog.h>
 #include <protocol/capability/application.h>
 #include <protocol/capability/transport.h>
 #include <socket/socket.h>
 #include "protocol/header/tcp.hpp"
 #include "tcp_send_window.h"
+#include "tcp_receive_window.h"
 
 namespace coro::net::trans {
 
@@ -56,14 +58,19 @@ public:
     virtual void on_session_closed(TcpState prev_state, const TcpSocketHandle& handle) = 0;
 };
 
-class TcpSession : public TcpSendEvents  {
+class TcpSession : public TcpSendEvents {
 public:
     TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local, const SocketAddress& remote);
-    TcpSession(const TcpSession& session, const SocketAddress& remote);
+    TcpSession(const TcpSession&) = delete;
+    TcpSession& operator=(const TcpSession&) = delete;
     virtual ~TcpSession();
     bool is_connected() const;
     bool is_closed() const;
     bool is_writable() const;
+    bool is_readable() const;
+    bool has_readable_data() const;
+    bool is_eof() const;
+    size_t read_into(std::span<uint8_t> out);
     int get_socket_fd() const;
     TcpState get_state() const;
     std::string_view get_string_state() const;
@@ -80,6 +87,7 @@ protected:
     TCP_LOCK_REQUIRED void switch_to(TcpState next_state);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
     TCP_LOCK_REQUIRED void start_time_wait_timer();
+    void receive_user_data(const TcpSegment& header, const SocketBuffer& payload);
     virtual void notify_state_update(TcpState prev, TcpState next) const {}
     co_async<> time_wait_timer(std::shared_ptr<std::atomic_bool> cancelled);
     void on_retransmission_failed() override;
@@ -112,13 +120,12 @@ protected:
     const SocketAddress remote;
     std::atomic<TcpState> state;
 
-    std::mutex session_mutex;
+    mutable std::mutex session_mutex;
     uint32_t sequence_number;
-    uint32_t ack_number;
 
-    std::optional<uint32_t> finish_sequence;
     std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
     TcpSendWindow send_window;
+    TcpReceiveWindow receive_window;
 };
 
 class TcpConnectSession : public TcpSession, public std::enable_shared_from_this<TcpConnectSession> {
@@ -134,11 +141,6 @@ public:
             send_tcp_segment(outbound, TcpSegment::FLAG_SYN);
             sequence_number += 1;
         }
-    }
-
-    explicit TcpConnectSession(const TcpSession& session, const SocketAddress& remote)
-        : TcpSession(session, remote)
-    {
     }
 
     ~TcpConnectSession() override = default;
@@ -173,20 +175,18 @@ public:
 
     ~TcpListenSession() override
     {
-        std::vector<std::shared_ptr<TcpConnectSession>> sessions; {
-            std::lock_guard lock(accept_mutex);
-            for (auto& [_, session]: accept_queue)
-            {
-                sessions.push_back(session);
-            }
-            accept_queue.clear();
-            accept_waiters.clear();
-        }
-
-        for (auto& session: sessions)
+        std::lock_guard lock(accept_mutex);
+        for (auto [_, session]: accept_queue)
         {
             session->close();
         }
+    }
+
+    std::shared_ptr<TcpConnectSession> create_accept_session(const SocketAddress& client)
+    {
+        TcpSocketHandle handle = {local, client};
+        auto conn_session = std::make_shared<TcpConnectSession>(manager, TcpState::Listen, handle);
+        return conn_session;
     }
 
     std::shared_ptr<TcpConnectSession> accept_client()
@@ -227,11 +227,11 @@ public:
     {
         if (header.contains(TcpSegment::FLAG_SYN) and !header.contains(TcpSegment::FLAG_ACK))
         {
-            auto new_session = std::make_shared<TcpConnectSession>(*this, client);
-            new_session->process_tcp_segment(header, payload);
+            auto accept_session = create_accept_session(client);
+            accept_session->process_tcp_segment(header, payload);
 
             std::lock_guard lock(accept_mutex);
-            accept_queue.emplace(client, new_session);
+            accept_queue.emplace(client, accept_session);
             return std::pair(nullptr, nullptr);
         }
 

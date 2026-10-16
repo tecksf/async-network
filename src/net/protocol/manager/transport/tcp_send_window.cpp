@@ -29,6 +29,15 @@ void TcpSendWindow::push_outbound(const TcpSegment& segment, const SocketBuffer&
         initialized = true;
     }
 
+    if (seq_len == 0)
+    {
+        TcpContext context;
+        context.ip = destination_ip;
+        context.protocol = Protocol::TCP;
+        app->sumit_task(trans->async_send_tcp_segment(outbound, context));
+        return;
+    }
+
     auto entry = std::make_shared<TcpInFlightSegment>(next_segment_id++, seq_num, seq_len, outbound);
     pending.push_back(entry);
 
