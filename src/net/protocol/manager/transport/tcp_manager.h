@@ -1,8 +1,11 @@
 #ifndef ASYNC_NETWORK_TCP_MANAGER_H
 #define ASYNC_NETWORK_TCP_MANAGER_H
 
+#include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <spdlog/spdlog.h>
 #include <common/socket_buffer.h>
 #include <protocol/capability/application.h>
@@ -13,11 +16,12 @@
 
 namespace coro::net::trans {
 
-class TcpManager {
+class TcpManager : public TcpSessionEvent {
 public:
     TcpManager(app::ApplicationService* app, inet::InternetService* inet, trans::TransportService* trans,
                std::shared_ptr<spdlog::logger> logger);
-    ~TcpManager();
+    ~TcpManager() override;
+    void on_session_closed(TcpState prev_state, const TcpSocketHandle& handle) override;
 
     co_async<> on_tcp_segment_received(const SocketBuffer& inbound, const TcpContext& ctx);
     co_async<> async_send_tcp_segment(const SocketBuffer outbound, const TcpContext ctx);
@@ -28,6 +32,7 @@ public:
 
 private:
     std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data) const;
+    void add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session);
 
 private:
     app::ApplicationService* app;
@@ -35,7 +40,7 @@ private:
     inet::InternetService* inet;
     std::shared_ptr<spdlog::logger> logger;
 
-    std::mutex socket_mutex;
+    std::recursive_mutex socket_mutex;
     std::map<int, std::shared_ptr<TcpSession>> sockets;
     std::map<TcpSocketHandle, std::shared_ptr<TcpConnectSession>> connection_sessions;
     std::map<SocketAddress, std::shared_ptr<TcpListenSession>> listen_sessions;

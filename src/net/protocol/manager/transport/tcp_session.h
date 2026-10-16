@@ -1,6 +1,7 @@
 #ifndef ASYNC_NETWORK_TCP_SESSION_H
 #define ASYNC_NETWORK_TCP_SESSION_H
 
+#include <chrono>
 #include <map>
 #include <deque>
 #include <spdlog/spdlog.h>
@@ -43,6 +44,12 @@ inline const char* get_state_name(TcpState state)
     return TcpStateNames[static_cast<std::size_t>(state)];
 }
 
+class TcpSessionEvent {
+public:
+    virtual ~TcpSessionEvent() = default;
+    virtual void on_session_closed(TcpState prev_state, const TcpSocketHandle& handle) = 0;
+};
+
 class TcpSession {
 public:
     TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local);
@@ -56,6 +63,7 @@ public:
     std::string_view get_string_state() const;
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
+    TcpSocketHandle get_socket_handle() const;
     void process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
     void send_user_data(const std::vector<SocketBuffer>& payloads);
     virtual void add_waiter(UserSocketContext* ctx) = 0;
@@ -64,6 +72,7 @@ public:
 protected:
     void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
     void switch_to(TcpState next_state);
+    virtual void notify_state_update(TcpState prev, TcpState next) const {}
     co_async<> time_wait_timer(std::shared_ptr<std::atomic_bool> cancelled);
     void start_time_wait_timer();
 
@@ -81,13 +90,14 @@ protected:
     TcpState process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload);
 
 protected:
-    static constexpr std::chrono::seconds MaximumSegmentLifetime{3};
+    static constexpr std::chrono::seconds MaximumSegmentLifetime{TCP_MAX_SEGMENT_LIFETIME};
     static constexpr std::chrono::seconds TimeWaitTimeout{MaximumSegmentLifetime * 2};
 
     app::ApplicationService* app;
     trans::TransportService* trans;
     std::shared_ptr<spdlog::logger> logger;
     TcpManager* manager;
+    TcpSessionEvent* session_events;
 
     const uint32_t session_id;
     const int socket_fd;
@@ -125,27 +135,20 @@ public:
 
     ~TcpConnectSession() override = default;
 
-    TcpSocketHandle get_socket_handle() const
-    {
-        return TcpSocketHandle{.local = local, .remote = remote};
-    }
-
-    std::pair<std::shared_ptr<TcpConnectSession>, UserSocketContext*>
-    process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
+    UserSocketContext* process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
     {
         UserSocketContext* w = nullptr;
-        std::shared_ptr<TcpConnectSession> session = nullptr;
 
         TcpState prev = state;
         TcpSession::process_tcp_segment(header, payload);
 
-        if (prev != state && (state == TcpState::Established || state == TcpState::Closed))
+        // connect waiter, waiter should not be nullptr
+        if (prev != state && state == TcpState::Established)
         {
             std::swap(waiter, w);
-            session = shared_from_this();
         }
 
-        return std::pair(session, w);
+        return w;
     }
 
     void add_waiter(UserSocketContext* ctx) override
@@ -170,7 +173,7 @@ public:
 
     ~TcpListenSession() override
     {
-        for (auto& [_, session] : accept_queue)
+        for (auto& [_, session]: accept_queue)
         {
             session->close();
         }
@@ -190,6 +193,11 @@ public:
         }
 
         return session;
+    }
+
+    void remove_accept_session(const SocketAddress& client)
+    {
+        accept_queue.erase(client);
     }
 
     void add_waiter(UserSocketContext* ctx) override

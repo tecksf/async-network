@@ -9,12 +9,13 @@ namespace coro::net::trans {
 TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local)
     : app(manager->get_app()), trans(manager->get_trans()), logger(manager->get_logger()),
       manager(manager),
+      session_events(manager),
       session_id(rand_uint<uint32_t>()),
       socket_fd(app->allocate_fd()),
       local(local)
 {
     state = s;
-    logger->debug("===> TCP session [{0}] created: State: {1}", session_id, get_state_name(s));
+    logger->debug("===> TCP session [{0}] created， State: {1}", session_id, get_state_name(s));
 }
 
 TcpSession::~TcpSession()
@@ -23,7 +24,8 @@ TcpSession::~TcpSession()
 }
 
 TcpSession::TcpSession(const TcpSession& session)
-    : session_id(rand_uint<uint32_t>()),
+    : session_events(session.session_events),
+      session_id(rand_uint<uint32_t>()),
       socket_fd(session.app->allocate_fd()),
       local(session.local)
 {
@@ -37,6 +39,8 @@ TcpSession::TcpSession(const TcpSession& session)
     sequence_number = session.sequence_number;
     ack_number = session.ack_number;
     finish_sequence = session.finish_sequence;
+
+    logger->debug("===> TCP session [{0}] created， State: {1}", session_id, get_state_name(state));
 }
 
 TcpState TcpSession::get_state() const
@@ -77,6 +81,11 @@ SocketAddress TcpSession::get_local_address() const
 SocketAddress TcpSession::get_remote_address() const
 {
     return remote;
+}
+
+TcpSocketHandle TcpSession::get_socket_handle() const
+{
+    return TcpSocketHandle{.local = local, .remote = remote};
 }
 
 void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
@@ -135,9 +144,15 @@ void TcpSession::switch_to(TcpState next_state)
     state = next_state;
     logger->debug("===> TCP session [{0}] State change: {1} --> {2}", session_id, get_state_name(prev_state), get_state_name(next_state));
 
+    notify_state_update(prev_state, next_state);
+
     if (next_state == TcpState::TimeWait)
     {
         start_time_wait_timer();
+    }
+    else if (next_state == TcpState::Closed)
+    {
+        session_events->on_session_closed(prev_state, get_socket_handle());
     }
 }
 
@@ -421,6 +436,7 @@ void TcpSession::close()
             next_state = TcpState::Closed;
             break;
         case TcpState::SynReceived:
+            // user cannot call close(), maybe RST is better
             send_fin_segment();
             next_state = TcpState::FinWait1;
             break;

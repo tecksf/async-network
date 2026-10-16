@@ -1,4 +1,5 @@
 #include "tcp_manager.h"
+#include <cassert>
 #include <protocol/header/tcp.hpp>
 
 namespace coro::net::trans {
@@ -42,24 +43,11 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     handle.local = {inet->get_host_ip(), header.get_destination_port()};
     handle.remote = {ctx.ip, header.get_source_port()};
 
-    std::lock_guard<std::mutex> lock(socket_mutex);
+    std::lock_guard lock(socket_mutex);
     if (auto conn = connection_sessions.find(handle); conn != connection_sessions.end())
     {
-        auto [conn_session, waiter] = conn->second->process_tcp_segment(header, payload);
-        if (conn_session && conn_session == conn->second)
-        {
-            if (conn_session->is_connected())
-            {
-                sockets.emplace(conn_session->get_socket_fd(), conn_session);
-            }
-            else if (conn_session->is_closed())
-            {
-                sockets.erase(conn_session->get_socket_fd());
-                connection_sessions.erase(conn);
-            }
-        }
-
-        if (waiter)
+        auto conn_session = conn->second;
+        if (auto waiter = conn_session->process_tcp_segment(header, payload))
         {
             if (waiter->operation == SocketOperation::Connect)
             {
@@ -75,12 +63,11 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     }
     else if (auto listen = listen_sessions.find(handle.local); listen != listen_sessions.end())
     {
-        auto session = listen->second;
-        auto [conn_session, waiter] = session->process_tcp_segment(header, payload, handle.remote);
+        auto listen_session = listen->second;
+        auto [conn_session, waiter] = listen_session->process_tcp_segment(header, payload, handle.remote);
         if (conn_session && waiter)
         {
-            connection_sessions.emplace(handle, conn_session);
-            sockets.emplace(conn_session->get_socket_fd(), conn_session);
+            add_new_connection_session(conn_session);
 
             waiter->address = handle.remote;
             waiter->result = conn_session->get_socket_fd();
@@ -103,7 +90,7 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
 
     do
     {
-        std::lock_guard<std::mutex> lock(socket_mutex);
+        std::lock_guard lock(socket_mutex);
         if (ctx->operation == SocketOperation::Bind)
         {
             auto [it, succeed] = listen_sessions.try_emplace(ctx->address, std::make_shared<TcpListenSession>(this, ctx->address));
@@ -175,6 +162,38 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
     return done;
 }
 
+void TcpManager::on_session_closed(TcpState prev_state, const TcpSocketHandle& handle)
+{
+    do
+    {
+        std::lock_guard lock(socket_mutex);
+        if (prev_state == TcpState::Listen)
+        {
+            if (auto node = listen_sessions.extract(handle.local))
+            {
+                auto session = node.mapped();
+                sockets.erase(session->get_socket_fd());
+            }
+            break;
+        }
+
+        if (prev_state != TcpState::SynReceived)
+        {
+            if (auto node = connection_sessions.extract(handle))
+            {
+                auto session = node.mapped();
+                sockets.erase(session->get_socket_fd());
+                break;
+            }
+        }
+
+        if (auto it = listen_sessions.find(handle.local); it != listen_sessions.end())
+        {
+            it->second->remove_accept_session(handle.remote);
+        }
+    } while (false);
+}
+
 std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data) const
 {
     std::vector<SocketBuffer> outbounds;
@@ -193,6 +212,12 @@ std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t
     }
 
     return outbounds;
+}
+
+void TcpManager::add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session)
+{
+    connection_sessions.emplace(session->get_socket_handle(), session);
+    sockets.emplace(session->get_socket_fd(), session);
 }
 
 std::shared_ptr<spdlog::logger> TcpManager::get_logger() const

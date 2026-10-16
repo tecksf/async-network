@@ -26,6 +26,12 @@ constexpr int IP_V4_MTU = ETHERNET_MTU - IPv4_HEADER_SIZE;
 
 constexpr int TCP_WINDOW_SIZE = 65535;
 
+#ifdef NDEBUG
+constexpr int TCP_MAX_SEGMENT_LIFETIME = 30;
+#else
+constexpr int TCP_MAX_SEGMENT_LIFETIME = 1;
+#endif
+
 }
 
 #endif //ASYNC_NETWORK_TYPES_H
