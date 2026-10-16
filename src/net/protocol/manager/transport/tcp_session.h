@@ -129,6 +129,7 @@ public:
             sequence_number = rand_uint<uint32_t>() & 0xffff;
             auto outbound = app->allocate_socket_buffer();
             send_tcp_segment(outbound, TcpSegment::FLAG_SYN);
+            sequence_number += 1;
         }
     }
 

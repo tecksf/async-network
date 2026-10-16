@@ -17,8 +17,9 @@ public:
     TcpSocket& operator=(TcpSocket&& other) noexcept;
 
     static TcpConnectAwaiter connect(const IpAddress& ip, uint16_t port);
-    IpAddress get_ip_address() const;
-    uint16_t get_port() const;
+    static TcpConnectAwaiter connect(std::string_view addr);
+    SocketAddress get_local_address() const;
+    SocketAddress get_remote_address() const;
     TcpWriteAwaiter write(std::span<uint8_t> data) const;
     TcpWriteAwaiter write(std::string_view data) const;
     TcpReadAwaiter read(std::span<uint8_t> data) const;

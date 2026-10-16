@@ -212,13 +212,14 @@ TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& hea
     }
 
     uint32_t ack = header.get_ack_number();
-    if (ack != sequence_number + 1)
+    uint32_t seq = header.get_sequence_number();
+    if (ack != sequence_number)
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
         return state;
     }
 
-    ack_number = header.get_sequence_number() + 1;
+    ack_number = seq + 1;
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);

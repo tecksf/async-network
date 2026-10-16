@@ -52,7 +52,7 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
             {
                 if (waiter->operation == SocketOperation::Connect)
                 {
-                    waiter->address = handle.remote;
+                    waiter->address = handle.local;
                     waiter->result = conn_session->get_socket_fd();
                 }
                 else if (waiter->operation == SocketOperation::Read)
@@ -96,12 +96,11 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
     {
         if (ctx->operation == SocketOperation::Bind)
         {
-            auto new_listen_session = std::make_shared<TcpListenSession>(this, ctx->address);
-
             std::unique_lock lock(socket_mutex);
-            auto [it, succeed] = listen_sessions.try_emplace(ctx->address, new_listen_session);
+            auto [it, succeed] = listen_sessions.try_emplace(ctx->address, nullptr);
             if (succeed)
             {
+                it->second = std::make_shared<TcpListenSession>(this, ctx->address);
                 ctx->result = it->second->get_socket_fd();
                 sockets.emplace(ctx->result, it->second);
             }
@@ -132,6 +131,33 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
                 done = false;
                 listen_session->add_waiter(ctx);
             }
+        }
+        else if (ctx->operation == SocketOperation::Connect)
+        {
+            uint16_t port = rand_uint<uint16_t>();
+            SocketAddress local = {inet->get_host_ip(), port};
+
+            std::unique_lock lock(socket_mutex);
+            for (uint16_t i = port; i < port + 10000; i++)
+            {
+                local.port = i;
+                TcpSocketHandle handle = {local, ctx->address};
+
+                auto [it, succeed] = connection_sessions.try_emplace(handle, nullptr);
+                if (not succeed)
+                {
+                    continue;
+                }
+
+                done = false;
+                auto conn_session = std::make_shared<TcpConnectSession>(this, TcpState::SynSent, handle);
+                sockets.emplace(conn_session->get_socket_fd(), conn_session);
+                it->second = conn_session;
+                it->second->add_waiter(ctx);
+                break;
+            }
+
+            ctx->result = -EADDRINUSE;
         }
         else if (ctx->operation == SocketOperation::Write)
         {

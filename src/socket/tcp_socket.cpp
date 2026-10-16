@@ -36,14 +36,14 @@ TcpSocket::~TcpSocket()
     Socket::close(Protocol::TCP);
 }
 
-IpAddress TcpSocket::get_ip_address() const
+SocketAddress TcpSocket::get_local_address() const
 {
-    return remote.ip;
+    return local;
 }
 
-uint16_t TcpSocket::get_port() const
+SocketAddress TcpSocket::get_remote_address() const
 {
-    return remote.port;
+    return remote;
 }
 
 TcpWriteAwaiter TcpSocket::write(std::span<uint8_t> data) const
@@ -61,6 +61,16 @@ TcpConnectAwaiter TcpSocket::connect(const IpAddress& ip, uint16_t port)
 {
     auto network = Runtime::current()->current_network();
     return TcpConnectAwaiter(network, SocketAddress(ip, port));
+}
+
+TcpConnectAwaiter TcpSocket::connect(std::string_view addr)
+{
+    if (auto address = SocketAddress::from(addr))
+    {
+        auto network = Runtime::current()->current_network();
+        return TcpConnectAwaiter(network, address.value());
+    }
+    return TcpConnectAwaiter(-EADDRNOTAVAIL);
 }
 
 TcpReadAwaiter TcpSocket::read(std::span<uint8_t> data) const
