@@ -29,7 +29,7 @@ public:
     bool handle_user_socket_operation(UserSocketContext* ctx);
 
 private:
-    std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data) const;
+    std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data, size_t max_tcp_payload) const;
     void add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session);
     void release_session(TcpSession& session, TcpState prev_state);
     static bool is_waiter_ready(const TcpSession& session, const UserSocketContext& ctx);

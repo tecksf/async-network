@@ -15,16 +15,26 @@ enum class Protocol {
 
 constexpr int MAX_BLOCK_SIZE = 1536;
 constexpr int ETHERNET_HEADER_SIZE = 14;
-constexpr int IPv4_HEADER_SIZE = 20;
+constexpr int IP_V4_HEADER_SIZE = 20;
 constexpr int TCP_HEADER_SIZE = 20;
+constexpr int TCP_MAX_HEADER_SIZE = 60;
 constexpr int UDP_HEADER_SIZE = 8;
 constexpr int ICMP_HEADER_SIZE = 4;
 constexpr int ARP_HEADER_SIZE = 28;
 
 constexpr int ETHERNET_MTU = 1480;
-constexpr int IP_V4_MTU = ETHERNET_MTU - IPv4_HEADER_SIZE;
+constexpr int IP_V4_MTU = ETHERNET_MTU - IP_V4_HEADER_SIZE;
 
 constexpr int TCP_WINDOW_SIZE = 65535;
+
+constexpr int TCP_DEFAULT_MSS = IP_V4_MTU - TCP_HEADER_SIZE;
+
+constexpr int TCP_MIN_MSS = 536;
+
+// The stateless handshake has to survive the SYN -> ACK round trip without keeping per-connection state, so the
+// peer MSS is encoded into the low bits of the SYN cookie while the remaining high bits stay a keyed hash.
+constexpr int TCP_MSS_COOKIE_STEP = 4;
+constexpr int TCP_MSS_COOKIE_BITS = 8;
 
 // Length of a SYN cookie time slot in seconds. The listener does not create a session for a SYN; it derives a
 // keyed cookie per time slot and uses it as the SYN-ACK sequence number. Validation accepts both the current and

@@ -96,6 +96,7 @@ public:
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
     TcpSocketHandle get_socket_handle() const;
+    uint32_t get_send_mss() const;
 
     void process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
     int send_user_data(const std::vector<SocketBuffer>& payloads);
@@ -105,9 +106,12 @@ public:
 protected:
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> switch_to(TcpState next_state);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
+    TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size, const TcpOptionSet& options);
     TCP_LOCK_REQUIRED void start_time_wait_timer();
     void publish_transition(std::optional<TcpStateTransition> transition);
     void receive_user_data(const TcpSegment& header, const SocketBuffer& payload);
+    void set_peer_mss(uint16_t mss);
+    void update_peer_mss(const TcpSegment& header);
     virtual void notify_state_update(TcpState prev, TcpState next) const {}
     static co_async<> time_wait_timer(std::shared_ptr<TcpSession> session);
     void on_retransmission_failed() override;
@@ -147,6 +151,10 @@ protected:
     mutable std::mutex session_mutex;
     uint32_t sequence_number;
 
+    // MSS advertised by the peer (already clamped): the handshake thread writes it and the application
+    // thread reads it, so an atomic keeps both sides free of the session lock.
+    std::atomic<uint32_t> peer_mss{TCP_MIN_MSS};
+
     std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
     TcpSendWindow send_window;
     TcpReceiveWindow receive_window;
@@ -157,7 +165,7 @@ public:
     TcpConnectSession(TcpManager* manager, TcpState s, const TcpSocketHandle& handle);
     ~TcpConnectSession() override = default;
 
-    void restore_syn_cookie_state(std::uint32_t server_isn, std::uint32_t client_isn);
+    void restore_syn_cookie_state(std::uint32_t server_isn, std::uint32_t client_isn, std::uint16_t peer_mss);
     UserSocketContext* take_waiter() override;
     void add_waiter(UserSocketContext* ctx) override;
     UserSocketContext* peek_waiter() const override;
@@ -191,8 +199,10 @@ private:
     using AcceptIterator = AcceptQueue::iterator;
 
 
-    uint32_t make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot) const;
-    bool verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie) const;
+    static std::uint8_t encode_mss_code(std::uint16_t mss);
+    static std::uint16_t decode_mss_code(std::uint8_t code);
+    uint32_t make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot, std::uint8_t mss_code) const;
+    bool verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie, std::uint16_t& peer_mss) const;
     static std::uint64_t current_cookie_timeslot();
     void send_syn_ack_without_retransmission(const SocketBuffer& outbound, const SocketAddress& client, std::uint32_t cookie, std::uint32_t client_isn) const;
 

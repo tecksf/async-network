@@ -1,9 +1,6 @@
-//
-// Created by tang on 2026/10/17.
-//
-
 #include "tcp_session.h"
 #include "tcp_manager.h"
+#include <algorithm>
 #include <cassert>
 #include <common/encoding.h>
 #include <common/types.h>
@@ -13,6 +10,7 @@ namespace {
 
 constexpr int SipCompressionRounds = 2;
 constexpr int SipFinalizationRounds = 4;
+constexpr std::uint32_t SynCookieMssCodeMask = (1u << coro::net::TCP_MSS_COOKIE_BITS) - 1;
 
 constexpr std::uint64_t rotl64(std::uint64_t value, int bits)
 {
@@ -100,17 +98,22 @@ TcpConnectSession::TcpConnectSession(TcpManager* manager, TcpState s, const TcpS
     {
         std::lock_guard lock(session_mutex);
         sequence_number = rand_uint<uint32_t>() & 0xffff;
+
         auto outbound = app->allocate_socket_buffer();
-        send_tcp_segment(outbound, TcpSegment::FLAG_SYN);
+        constexpr TcpOptionSet options{.mss = TCP_DEFAULT_MSS};
+        send_tcp_segment(outbound, TcpSegment::FLAG_SYN, TCP_WINDOW_SIZE, options);
+
         sequence_number += 1;
     }
 }
 
-void TcpConnectSession::restore_syn_cookie_state(std::uint32_t server_isn, std::uint32_t client_isn)
+void TcpConnectSession::restore_syn_cookie_state(std::uint32_t server_isn, std::uint32_t client_isn, std::uint16_t mss)
 {
     std::lock_guard lock(session_mutex);
     sequence_number = server_isn + 1;
     receive_window.set_next_expected_sequence(client_isn + 1);
+    set_peer_mss(mss);
+    logger->debug("===> TCP session [{0}] recovered from SYN cookie, MSS: {1}", session_id, get_send_mss());
 }
 
 UserSocketContext* TcpConnectSession::take_waiter()
@@ -206,7 +209,20 @@ std::uint64_t TcpListenSession::current_cookie_timeslot()
     return static_cast<std::uint64_t>(seconds / TCP_SYN_COOKIE_INTERVAL);
 }
 
-uint32_t TcpListenSession::make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot) const
+std::uint8_t TcpListenSession::encode_mss_code(std::uint16_t mss)
+{
+    const std::uint32_t clamped = std::clamp<std::uint32_t>(mss, TCP_MIN_MSS, TCP_DEFAULT_MSS);
+    const std::uint32_t code = (clamped - TCP_MIN_MSS + TCP_MSS_COOKIE_STEP / 2) / TCP_MSS_COOKIE_STEP;
+    return static_cast<std::uint8_t>(std::min<std::uint32_t>(code, SynCookieMssCodeMask));
+}
+
+std::uint16_t TcpListenSession::decode_mss_code(std::uint8_t code)
+{
+    const std::uint32_t mss = TCP_MIN_MSS + static_cast<std::uint32_t>(code) * TCP_MSS_COOKIE_STEP;
+    return static_cast<std::uint16_t>(std::clamp<std::uint32_t>(mss, TCP_MIN_MSS, TCP_DEFAULT_MSS));
+}
+
+uint32_t TcpListenSession::make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot, std::uint8_t mss_code) const
 {
     std::array<std::uint8_t, 20> input{};
     std::size_t offset = 0;
@@ -218,24 +234,29 @@ uint32_t TcpListenSession::make_syn_cookie(const SocketAddress& client, std::uin
     put_bytes(input, offset, static_cast<std::uint32_t>(timeslot >> 32), 4);
 
     const std::uint64_t hash = siphash24(syn_cookie_key0, syn_cookie_key1, input);
-    return static_cast<std::uint32_t>(hash ^ (hash >> 32));
+    const std::uint32_t digest = static_cast<std::uint32_t>(hash ^ (hash >> 32));
+    return (digest & ~SynCookieMssCodeMask) | (mss_code & SynCookieMssCodeMask);
 }
 
-bool TcpListenSession::verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie) const
+bool TcpListenSession::verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie, std::uint16_t& peer_mss) const
 {
+    const auto mss_code = static_cast<std::uint8_t>(cookie & SynCookieMssCodeMask);
     const std::uint64_t timeslot = current_cookie_timeslot();
-    if (make_syn_cookie(client, timeslot) == cookie)
+    if (make_syn_cookie(client, timeslot, mss_code) == cookie or
+        (timeslot > 0 and make_syn_cookie(client, timeslot - 1, mss_code) == cookie))
     {
+        peer_mss = decode_mss_code(mss_code);
         return true;
     }
 
-    return timeslot > 0 and make_syn_cookie(client, timeslot - 1) == cookie;
+    return false;
 }
 
 void TcpListenSession::send_syn_ack_without_retransmission(const SocketBuffer& outbound, const SocketAddress& client, std::uint32_t cookie,
                                                            std::uint32_t client_isn) const
 {
-    auto text = outbound->allocate(TcpSegment::HeaderSize);
+    constexpr size_t header_size = TcpSegment::HeaderSize + TcpOption::MssOptionSize;
+    auto text = outbound->allocate(header_size);
 
     TcpSegment segment(text, true);
     segment.set_source_port(local.port);
@@ -244,12 +265,13 @@ void TcpListenSession::send_syn_ack_without_retransmission(const SocketBuffer& o
     segment.set_ack_number(client_isn + 1);
     segment.set_flag(TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK);
     segment.set_window_size(TCP_WINDOW_SIZE);
+    TcpOption(segment.get_options(), true).add_mss(TCP_DEFAULT_MSS);
 
     FakeHeader fake_header;
     fake_header.set_source_ip(local.ip);
     fake_header.set_destination_ip(client.ip);
     fake_header.set_protocol(Protocol::TCP);
-    fake_header.set_length(TcpSegment::HeaderSize);
+    fake_header.set_length(header_size);
     segment.seal(fake_header, outbound);
 
     TcpContext context{};
@@ -324,8 +346,10 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
         // SYN-ACK sequence number (cookie). Under a flood every SYN costs one hash plus one send, with no
         // queue entry and no retransmission coroutine.
         const std::uint32_t client_isn = header.get_sequence_number();
+        const std::uint16_t peer_mss = header.get_all_options().mss.value_or(TCP_MIN_MSS);
         auto outbound = SocketBuffer::reuse_for_outbound(payload);
-        send_syn_ack_without_retransmission(outbound, client, make_syn_cookie(client, current_cookie_timeslot()), client_isn);
+        uint32_t cookie_seq = make_syn_cookie(client, current_cookie_timeslot(), encode_mss_code(peer_mss));
+        send_syn_ack_without_retransmission(outbound, client, cookie_seq, client_isn);
         return {nullptr, nullptr};
     }
 
@@ -363,9 +387,9 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
         return {nullptr, nullptr};
     }
 
-    // recover the cookie from the ack number; a mismatch means a forged source or an expired cookie
     const std::uint32_t ack_number = header.get_ack_number();
-    if (ack_number == 0 or not verify_syn_cookie(client, ack_number - 1))
+    std::uint16_t peer_mss = TCP_MIN_MSS;
+    if (ack_number == 0 or not verify_syn_cookie(client, ack_number - 1, peer_mss))
     {
         std::lock_guard lock(accept_mutex);
         report_dropped(client, "invalid SYN cookie");
@@ -374,7 +398,7 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
 
     // valid cookie: preload the sequence numbers, create the session and let the state machine finish the handshake
     auto session = create_accept_session(client);
-    session->restore_syn_cookie_state(ack_number - 1, header.get_sequence_number() - 1);
+    session->restore_syn_cookie_state(ack_number - 1, header.get_sequence_number() - 1, peer_mss);
     session->process_tcp_segment(header, payload);
 
     // the sequence numbers were preloaded from the cookie, so the state machine must reach Established

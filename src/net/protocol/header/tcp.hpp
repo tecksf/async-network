@@ -3,6 +3,7 @@
 
 #include "layer.hpp"
 #include "fake.hpp"
+#include "tcp_option.hpp"
 #include <common/types.h>
 #include <common/encoding.h>
 #include <common/socket_buffer.h>
@@ -34,13 +35,15 @@ public:
     {
         if (create)
         {
-            std::ranges::fill(data.first(HeaderSize), 0);
-            set_header_len(HeaderSize);
+            std::ranges::fill(data, 0);
+            if (data.size() > HeaderSize)
+                options = data.subspan(HeaderSize);
+            set_header_len(static_cast<uint8_t>(data.size()));
         }
         else
         {
-            if (int option_size = get_header_len() - HeaderSize; option_size > 0)
-                options = data.subspan(HeaderSize, option_size);
+            if (size_t size = get_option_size(); size > 0)
+                options = data.subspan(HeaderSize, size);
             payload = data.subspan(get_header_len());
         }
     }
@@ -138,6 +141,18 @@ public:
         return options;
     }
 
+    size_t get_option_size() const
+    {
+        const auto length = get_header_len();
+        return length > HeaderSize ? length - HeaderSize : 0;
+    }
+
+    // Parse the whole option list, see TcpOption for the implementation.
+    TcpOptionSet get_all_options() const
+    {
+        return TcpOption(options).get_all_options();
+    }
+
     bool contains(uint8_t flag) const
     {
         return (control_flag[0] & flag) == flag;
@@ -184,8 +199,6 @@ public:
     void set_header_len(uint8_t length)
     {
         header_len[0] = ((length / 4) << 4) & 0xf0;
-        // if (int option_size = length - HeaderSize; option_size > 0)
-        //     options = message.subspan(HeaderSize, option_size);
     }
 
     void set_flag(uint8_t flag)

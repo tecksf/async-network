@@ -1,5 +1,6 @@
 #include "tcp_session.h"
 #include "tcp_manager.h"
+#include <algorithm>
 #include <async/coro.h>
 #include <protocol/header/tcp.hpp>
 
@@ -93,6 +94,26 @@ SocketAddress TcpSession::get_remote_address() const
 TcpSocketHandle TcpSession::get_socket_handle() const
 {
     return TcpSocketHandle{.local = local, .remote = remote};
+}
+
+uint32_t TcpSession::get_send_mss() const
+{
+    return peer_mss.load(std::memory_order_relaxed);
+}
+
+void TcpSession::set_peer_mss(uint16_t mss)
+{
+    // The peer MSS can not exceed what our own MTU allows, and must not drop below the RFC 1122 minimum.
+    peer_mss.store(std::clamp<uint32_t>(mss, TCP_MIN_MSS, TCP_DEFAULT_MSS), std::memory_order_relaxed);
+}
+
+void TcpSession::update_peer_mss(const TcpSegment& header)
+{
+    if (const auto mss = header.get_all_options().mss)
+    {
+        set_peer_mss(mss.value());
+        logger->debug("===> TCP session [{0}] negotiated MSS: {1}", session_id, get_send_mss());
+    }
 }
 
 void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
@@ -202,9 +223,11 @@ TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& heade
     uint32_t seq = header.get_sequence_number();
     receive_window.set_next_expected_sequence(seq + 1);
     sequence_number = rand_uint<uint32_t>() & 0xffff;
+    set_peer_mss(header.get_all_options().mss.value_or(TCP_MIN_MSS));
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
-    send_tcp_segment(outbound, TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK);
+    const TcpOptionSet options{.mss = static_cast<uint16_t>(TCP_DEFAULT_MSS)};
+    send_tcp_segment(outbound, TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK, TCP_WINDOW_SIZE, options);
 
     sequence_number += 1;
 
@@ -227,6 +250,9 @@ TcpState TcpSession::process_tcp_segment_in_syn_received_state(const TcpSegment&
         return state;
     }
 
+    // The MSS normally travels in the cookie of the stateless handshake, but a client may repeat it in its ACK.
+    update_peer_mss(header);
+
     return TcpState::Established;
 }
 
@@ -247,6 +273,7 @@ TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& hea
     }
 
     receive_window.set_next_expected_sequence(seq + 1);
+    update_peer_mss(header);
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
@@ -260,9 +287,8 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
     uint32_t payload_size = payload->size();
     TcpState next_state = state;
 
-    if (header.contains(TcpSegment::FLAG_PSH))
+    if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
-        logger->info("receive user data {} bytes", payload_size);
         receive_user_data(header, payload);
     }
 
@@ -485,6 +511,41 @@ void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uin
     fake_header.set_destination_ip(remote.ip);
     fake_header.set_protocol(Protocol::TCP);
     fake_header.set_length(TcpSegment::HeaderSize + payload->size());
+    segment.seal(fake_header, outbound);
+
+    sequence_number += payload->size();
+
+    send_window.push_outbound(segment, outbound);
+}
+
+void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size, const TcpOptionSet& options)
+{
+    std::array<uint8_t, TcpOption::MaximumOptionSize> option_data{};
+    TcpOption option(option_data, true);
+    const size_t option_size = option.add_options(options);
+
+    SocketBuffer outbound = payload;
+    const size_t header_size = TcpSegment::HeaderSize + option_size;
+    auto text = outbound->allocate(header_size);
+
+    TcpSegment segment(text, true);
+    segment.set_source_port(local.port);
+    segment.set_destination_port(remote.port);
+    segment.set_sequence_number(sequence_number);
+    segment.set_ack_number(receive_window.get_next_expected_sequence());
+    segment.set_flag(flag);
+    segment.set_header_len(static_cast<uint8_t>(header_size));
+    segment.set_window_size(window_size);
+    if (option_size > 0)
+    {
+        std::ranges::copy_n(option_data.begin(), option_size, segment.get_options().begin());
+    }
+
+    FakeHeader fake_header;
+    fake_header.set_source_ip(local.ip);
+    fake_header.set_destination_ip(remote.ip);
+    fake_header.set_protocol(Protocol::TCP);
+    fake_header.set_length(header_size + payload->size());
     segment.seal(fake_header, outbound);
 
     sequence_number += payload->size();

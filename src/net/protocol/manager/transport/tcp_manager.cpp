@@ -1,4 +1,5 @@
 #include "tcp_manager.h"
+#include <algorithm>
 #include <cassert>
 #include <protocol/header/tcp.hpp>
 
@@ -291,7 +292,7 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
                 break;
             }
 
-            ctx->result = session->send_user_data(copy_user_data_to_buffer(ctx->data));;
+            ctx->result = session->send_user_data(copy_user_data_to_buffer(ctx->data, session->get_send_mss()));
         }
         else if (ctx->operation == SocketOperation::Read)
         {
@@ -341,15 +342,16 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
     return done;
 }
 
-std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data) const
+std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data, size_t max_tcp_payload) const
 {
     std::vector<SocketBuffer> outbounds;
-    constexpr int max_capacity = align_down_8(IP_V4_MTU) - TcpSegment::HeaderSize;
+    constexpr size_t max_mtu_payload = IP_V4_MTU - TcpSegment::HeaderSize;
+    const size_t max_capacity = std::clamp<size_t>(max_tcp_payload, 1, max_mtu_payload);
 
     std::span<uint8_t> rest = user_data;
     while (not rest.empty())
     {
-        const int len = std::min(static_cast<int>(rest.size()), max_capacity);
+        const size_t len = std::min(rest.size(), max_capacity);
         auto outbound = app->allocate_socket_buffer();
         outbound->allocate(len);
         std::copy_n(rest.begin(), len, outbound->begin());
