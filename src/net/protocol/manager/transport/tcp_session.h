@@ -1,14 +1,19 @@
 #ifndef ASYNC_NETWORK_TCP_SESSION_H
 #define ASYNC_NETWORK_TCP_SESSION_H
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string_view>
+#include <vector>
 #include <spdlog/spdlog.h>
 #include <protocol/capability/application.h>
 #include <protocol/capability/transport.h>
@@ -149,41 +154,13 @@ protected:
 
 class TcpConnectSession : public TcpSession {
 public:
-    TcpConnectSession(TcpManager* manager, TcpState s, const TcpSocketHandle& handle)
-        : TcpSession(manager, s, handle.local, handle.remote)
-    {
-        if (state == TcpState::SynSent)
-        {
-            std::lock_guard lock(session_mutex);
-            sequence_number = rand_uint<uint32_t>() & 0xffff;
-            auto outbound = app->allocate_socket_buffer();
-            send_tcp_segment(outbound, TcpSegment::FLAG_SYN);
-            sequence_number += 1;
-        }
-    }
-
+    TcpConnectSession(TcpManager* manager, TcpState s, const TcpSocketHandle& handle);
     ~TcpConnectSession() override = default;
 
-    UserSocketContext* take_waiter() override
-    {
-        return waiter.exchange(nullptr, std::memory_order_acq_rel);
-    }
-
-    void add_waiter(UserSocketContext* ctx) override
-    {
-        if (ctx == nullptr)
-        {
-            return;
-        }
-
-        UserSocketContext* expected = nullptr;
-        waiter.compare_exchange_strong(expected, ctx, std::memory_order_acq_rel);
-    }
-
-    UserSocketContext* peek_waiter() const override
-    {
-        return waiter.load(std::memory_order_acquire);
-    }
+    void restore_syn_cookie_state(std::uint32_t server_isn, std::uint32_t client_isn);
+    UserSocketContext* take_waiter() override;
+    void add_waiter(UserSocketContext* ctx) override;
+    UserSocketContext* peek_waiter() const override;
 
 private:
     std::atomic<UserSocketContext*> waiter = nullptr;
@@ -192,109 +169,53 @@ private:
 
 class TcpListenSession : public TcpSession {
 public:
-    explicit TcpListenSession(TcpManager* manager, const SocketAddress& local)
-        : TcpSession(manager, TcpState::Listen, local, SocketAddress{})
-    {
-    }
+    explicit TcpListenSession(TcpManager* manager, const SocketAddress& local);
+    ~TcpListenSession() override;
 
-    ~TcpListenSession() override
-    {
-        std::map<SocketAddress, std::shared_ptr<TcpConnectSession>> pending;
-        //
-        {
-            std::lock_guard lock(accept_mutex);
-            pending.swap(accept_queue);
-        }
-
-        for (auto& [_, session]: pending)
-        {
-            session->close();
-        }
-    }
-
-    std::shared_ptr<TcpConnectSession> create_accept_session(const SocketAddress& client)
-    {
-        TcpSocketHandle handle = {local, client};
-        auto conn_session = std::make_shared<TcpConnectSession>(manager, TcpState::Listen, handle);
-        return conn_session;
-    }
-
-    std::shared_ptr<TcpConnectSession> accept_client()
-    {
-        std::lock_guard lock(accept_mutex);
-        for (auto iter = accept_queue.begin(); iter != accept_queue.end(); ++iter)
-        {
-            if (iter->second->is_connected())
-            {
-                auto session = iter->second;
-                accept_queue.erase(iter);
-                return session;
-            }
-        }
-
-        return nullptr;
-    }
-
-    void remove_accept_session(const SocketAddress& client)
-    {
-        std::lock_guard lock(accept_mutex);
-        accept_queue.erase(client);
-    }
-
-    void add_waiter(UserSocketContext* ctx) override
-    {
-        if (ctx == nullptr)
-        {
-            return;
-        }
-
-        std::lock_guard lock(accept_mutex);
-        accept_waiters.push_back(ctx);
-    }
+    std::shared_ptr<TcpConnectSession> create_accept_session(const SocketAddress& client, TcpState s = TcpState::SynReceived);
+    std::shared_ptr<TcpConnectSession> accept_client();
+    void remove_accept_session(const SocketAddress& client);
+    void add_waiter(UserSocketContext* ctx) override;
 
     std::pair<std::shared_ptr<TcpConnectSession>, UserSocketContext*>
-    process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client)
-    {
-        if (header.contains(TcpSegment::FLAG_SYN) and !header.contains(TcpSegment::FLAG_ACK))
-        {
-            auto accept_session = create_accept_session(client);
-            accept_session->process_tcp_segment(header, payload);
-
-            std::lock_guard lock(accept_mutex);
-            accept_queue.emplace(client, accept_session);
-            return std::pair(nullptr, nullptr);
-        }
-
-        std::shared_ptr<TcpConnectSession> client_session;
-        //
-        {
-            std::lock_guard lock(accept_mutex);
-            auto it = accept_queue.find(client);
-            if (it == accept_queue.end())
-            {
-                return std::pair(nullptr, nullptr);
-            }
-            client_session = it->second;
-        }
-
-        client_session->process_tcp_segment(header, payload);
-
-        std::lock_guard lock(accept_mutex);
-        if (client_session->is_connected() && not accept_waiters.empty())
-        {
-            auto w = accept_waiters.front();
-            accept_waiters.pop_front();
-            accept_queue.erase(client);
-            return std::pair{client_session, w};
-        }
-
-        return std::pair(nullptr, nullptr);
-    }
+    process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client);
 
 private:
+    // sessions that already completed the handshake and wait for accept; created_time_point drives lazy expiry
+    struct AcceptEntry {
+        std::shared_ptr<TcpConnectSession> session;
+        std::chrono::steady_clock::time_point created_time_point;
+    };
+
+    using AcceptQueue = std::map<SocketAddress, AcceptEntry>;
+    using AcceptIterator = AcceptQueue::iterator;
+
+
+    uint32_t make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot) const;
+    bool verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie) const;
+    static std::uint64_t current_cookie_timeslot();
+    void send_syn_ack_without_retransmission(const SocketBuffer& outbound, const SocketAddress& client, std::uint32_t cookie, std::uint32_t client_isn) const;
+
+    // collect and remove timed-out accept entries; the caller closes these sessions outside the lock
+    TCP_LOCK_REQUIRED void collect_expired_accepts(std::vector<std::shared_ptr<TcpConnectSession>>& expired);
+    // throttled drop/error logging, so a flood can not flood the log as well
+    TCP_LOCK_REQUIRED void report_dropped(const SocketAddress& client, std::string_view reason);
+
+    static constexpr std::chrono::seconds DropLogInterval{1};
+    static constexpr std::chrono::seconds CleanupInterval{1};
+    static constexpr std::chrono::seconds AcceptTimeout{TCP_ACCEPT_BACKLOG_TIMEOUT};
+
+    const std::uint64_t syn_cookie_key0;
+    const std::uint64_t syn_cookie_key1;
+
     std::mutex accept_mutex;
-    std::map<SocketAddress, std::shared_ptr<TcpConnectSession>> accept_queue;
+    AcceptQueue accept_queue;
     std::deque<UserSocketContext*> accept_waiters;
+
+    std::size_t dropped_since_log = 0;
+    std::size_t dropped_total = 0;
+    std::chrono::steady_clock::time_point last_drop_log{};
+    std::chrono::steady_clock::time_point last_cleanup{};
 };
 
 

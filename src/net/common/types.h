@@ -26,6 +26,21 @@ constexpr int IP_V4_MTU = ETHERNET_MTU - IPv4_HEADER_SIZE;
 
 constexpr int TCP_WINDOW_SIZE = 65535;
 
+// Length of a SYN cookie time slot in seconds. The listener does not create a session for a SYN; it derives a
+// keyed cookie per time slot and uses it as the SYN-ACK sequence number. Validation accepts both the current and
+// the previous slot, so a handshake has 1~2 time slots to complete.
+constexpr int TCP_SYN_COOKIE_INTERVAL = 64;
+
+// A session that already completed the handshake but was not accepted by the application within this many
+// seconds is reclaimed by the lazy cleanup. With the stateless handshake there is no SYN-ACK retransmission
+// failure left as a natural way to release such a session, so this timeout is required.
+constexpr int TCP_ACCEPT_BACKLOG_TIMEOUT = 30;
+
+// Upper bound of the queue holding established sessions that are not accepted yet. When it is exceeded the
+// expired entries are reclaimed first, and a still-full queue drops the new connection, so an application that
+// never calls accept() can not grow memory without bound.
+constexpr int TCP_MAX_ACCEPT_BACKLOG = 128;
+
 #ifdef NDEBUG
 constexpr int TCP_MAX_SEGMENT_LIFETIME = 30;
 #else

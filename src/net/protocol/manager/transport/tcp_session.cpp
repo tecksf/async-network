@@ -262,6 +262,7 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
 
     if (header.contains(TcpSegment::FLAG_PSH))
     {
+        logger->info("receive user data {} bytes", payload_size);
         receive_user_data(header, payload);
     }
 
