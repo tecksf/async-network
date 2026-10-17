@@ -46,7 +46,7 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     if (auto conn_session = find_connection_session(handle))
     {
         conn_session->process_tcp_segment(header, payload);
-        handle_tcp_data_from_network(conn_session);
+        wakeup_waiter(*conn_session);
     }
     else if (auto listen_session = find_listen_session(handle.local))
     {
@@ -70,47 +70,137 @@ co_async<> TcpManager::async_send_tcp_segment(const SocketBuffer outbound, const
     co_await inet->async_send_ipv4_packet(outbound, context);
 }
 
-
-void TcpManager::handle_tcp_data_from_network(const std::shared_ptr<TcpConnectSession>& session)
+void TcpManager::on_session_state_changed(TcpSession& session, const TcpStateTransition& transition)
 {
-    auto waiter = session->take_waiter();
-    if (waiter == nullptr)
+    switch (transition.next)
+    {
+        case TcpState::Established:
+            wakeup_waiter(session);
+            break;
+        case TcpState::Closed:
+            release_session(session, transition.prev);
+            wakeup_waiter(session, transition.error);
+            break;
+        default:
+            break;
+    }
+}
+
+void TcpManager::release_session(TcpSession& session, TcpState prev_state)
+{
+    const TcpSocketHandle handle = session.get_socket_handle();
+    const int fd = session.get_socket_fd();
+
+    std::shared_ptr<TcpSession> removed;
+    bool accepted_child = false;
+    //
+    {
+        std::unique_lock lock(socket_mutex);
+
+        if (prev_state == TcpState::Listen)
+        {
+            auto it = listen_sessions.find(handle.local);
+            if (it != listen_sessions.end() and it->second->get_socket_fd() == fd)
+            {
+                removed = std::move(it->second);
+                listen_sessions.erase(it);
+                sockets.erase(fd);
+            }
+        }
+        else if (prev_state != TcpState::SynReceived)
+        {
+            if (auto node = connection_sessions.extract(handle); not node.empty())
+            {
+                removed = node.mapped();
+                sockets.erase(fd);
+            }
+            else
+            {
+                accepted_child = true;
+            }
+        }
+        else
+        {
+            accepted_child = true;
+        }
+    }
+
+    if (accepted_child)
+    {
+        if (auto listen_session = find_listen_session(handle.local))
+        {
+            listen_session->remove_accept_session(handle.remote);
+        }
+    }
+}
+
+void TcpManager::wakeup_waiter(TcpSession& session, int error) const
+{
+    UserSocketContext* waiter = session.peek_waiter();
+    if (waiter == nullptr or not is_waiter_ready(session, *waiter))
     {
         return;
     }
 
+    if (session.take_waiter() == nullptr)
+    {
+        return;
+    }
+
+    notify_waiter(session, waiter, error);
+}
+
+bool TcpManager::is_waiter_ready(const TcpSession& session, const UserSocketContext& waiter)
+{
+    if (waiter.operation == SocketOperation::Connect)
+    {
+        return session.is_connected() or session.is_closed();
+    }
+
+    if (waiter.operation == SocketOperation::Read)
+    {
+        auto [has_readable_data, is_eof] = session.get_read_status();
+        return has_readable_data or is_eof or session.is_closed();
+    }
+
+    return false;
+}
+
+void TcpManager::notify_waiter(TcpSession& session, UserSocketContext* waiter, int error) const
+{
     if (waiter->operation == SocketOperation::Connect)
     {
-        if (session->is_connected())
+        if (session.is_connected())
         {
-            waiter->address = session->get_local_address();
-            waiter->result = session->get_socket_fd();
-            app->notify_user(waiter->handle);
-            return;
+            waiter->address = session.get_local_address();
+            waiter->result = session.get_socket_fd();
         }
+        else
+        {
+            waiter->result = error != 0 ? error : -ECONNRESET;
+        }
+
+        app->notify_user(waiter->handle);
+        return;
     }
 
     if (waiter->operation == SocketOperation::Read)
     {
-        if (session->has_readable_data())
+        auto [has_readable_data, is_eof] = session.get_read_status();
+        if (has_readable_data)
         {
-            size_t count = session->read_into(waiter->data);
+            auto [count,_] = session.read_into(waiter->data);
             if (count > 0)
             {
                 waiter->result = count;
-                app->notify_user(waiter->handle);
-                return;
             }
         }
-        else if (session->is_eof())
+        else if (is_eof)
         {
             waiter->result = 0;
-            app->notify_user(waiter->handle);
-            return;
         }
+        app->notify_user(waiter->handle);
     }
-
-    session->add_waiter(waiter);
 }
 
 bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
@@ -178,7 +268,9 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
                 auto conn_session = std::make_shared<TcpConnectSession>(this, TcpState::SynSent, handle);
                 sockets.emplace(conn_session->get_socket_fd(), conn_session);
                 it->second = conn_session;
-                it->second->add_waiter(ctx);
+
+                conn_session->add_waiter(ctx);
+                wakeup_waiter(*conn_session); // maybe SYN-ACK already arrived before add_waiter
                 break;
             }
 
@@ -216,17 +308,17 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
                 break;
             }
 
-            if (session->has_readable_data())
+            auto [has_readable_data, is_eof] = session->get_read_status();
+            if (has_readable_data)
             {
-                size_t count = session->read_into(ctx->data);
+                auto [count,_] = session->read_into(ctx->data);
                 if (count > 0)
                 {
                     ctx->result = count;
                     break;
                 }
             }
-
-            if (session->is_eof())
+            else if (is_eof)
             {
                 ctx->result = 0;
                 break;
@@ -234,6 +326,7 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
 
             done = false;
             session->add_waiter(ctx);
+            wakeup_waiter(*session); // maybe PSH/FIN already arrived before add_waiter
         }
         else if (ctx->operation == SocketOperation::Close)
         {
@@ -246,34 +339,6 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
     } while (false);
 
     return done;
-}
-
-void TcpManager::on_session_closed(TcpState prev_state, const TcpSocketHandle& handle)
-{
-    if (prev_state == TcpState::Listen)
-    {
-        std::unique_lock lock(socket_mutex);
-        if (auto node = listen_sessions.extract(handle.local))
-        {
-            sockets.erase(node.mapped()->get_socket_fd());
-        }
-        return;
-    }
-
-    if (prev_state != TcpState::SynReceived)
-    {
-        std::unique_lock lock(socket_mutex);
-        if (auto node = connection_sessions.extract(handle))
-        {
-            sockets.erase(node.mapped()->get_socket_fd());
-            return;
-        }
-    }
-
-    if (auto listen_session = find_listen_session(handle.local))
-    {
-        listen_session->remove_accept_session(handle.remote);
-    }
 }
 
 std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data) const

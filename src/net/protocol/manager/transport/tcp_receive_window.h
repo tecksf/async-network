@@ -6,11 +6,8 @@
 #include <spdlog/spdlog.h>
 #include <protocol/capability/application.h>
 #include <protocol/capability/transport.h>
-#include <atomic>
-#include <algorithm>
 #include <chrono>
-#include <deque>
-#include <map>
+
 #include <set>
 #include <span>
 #include <memory>
@@ -19,7 +16,7 @@ namespace coro::net::trans {
 
 class TcpReceiveWindow {
 public:
-    explicit TcpReceiveWindow(app::ApplicationService* app, trans::TransportService* trans, std::shared_ptr<spdlog::logger> logger);
+    explicit TcpReceiveWindow(std::shared_ptr<spdlog::logger> logger);
     ~TcpReceiveWindow();
 
     void set_next_expected_sequence(uint32_t seq);
@@ -59,8 +56,6 @@ private:
     void advance_next_expected_sequence();
     void drop_consumed_data();
 
-    app::ApplicationService* app;
-    trans::TransportService* trans;
     std::shared_ptr<spdlog::logger> logger;
 
     bool initialized = false;

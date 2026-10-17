@@ -7,6 +7,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <spdlog/spdlog.h>
 #include <protocol/capability/application.h>
@@ -22,6 +23,7 @@ namespace coro::net::trans {
 
 class TcpManager;
 class TcpSegment;
+class TcpSession;
 
 struct TcpSocketHandle {
     SocketAddress local;
@@ -52,25 +54,37 @@ inline const char* get_state_name(TcpState state)
     return TcpStateNames[static_cast<std::size_t>(state)];
 }
 
+struct TcpStateTransition {
+    TcpState prev;
+    TcpState next;
+    int error = 0;
+};
+
+struct ReadResult {
+    size_t count = 0;
+    bool eof = false;
+};
+
 class TcpSessionEvent {
 public:
     virtual ~TcpSessionEvent() = default;
-    virtual void on_session_closed(TcpState prev_state, const TcpSocketHandle& handle) = 0;
+    virtual void on_session_state_changed(TcpSession& session, const TcpStateTransition& transition) = 0;
 };
 
-class TcpSession : public TcpSendEvents {
+class TcpSession : public TcpSendEvents, public std::enable_shared_from_this<TcpSession> {
 public:
     TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local, const SocketAddress& remote);
     TcpSession(const TcpSession&) = delete;
     TcpSession& operator=(const TcpSession&) = delete;
     virtual ~TcpSession();
+    virtual UserSocketContext* take_waiter() { return nullptr; }
+    virtual UserSocketContext* peek_waiter() const { return nullptr; }
     bool is_connected() const;
     bool is_closed() const;
     bool is_writable() const;
     bool is_readable() const;
-    bool has_readable_data() const;
-    bool is_eof() const;
-    size_t read_into(std::span<uint8_t> out);
+    std::pair<bool ,bool> get_read_status() const;
+    std::pair<size_t, bool> read_into(std::span<uint8_t> out);
     int get_socket_fd() const;
     TcpState get_state() const;
     std::string_view get_string_state() const;
@@ -80,16 +94,17 @@ public:
 
     void process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
     int send_user_data(const std::vector<SocketBuffer>& payloads);
-    void close();
+    void close(int error = 0);
     virtual void add_waiter(UserSocketContext* ctx) = 0;
 
 protected:
-    TCP_LOCK_REQUIRED void switch_to(TcpState next_state);
+    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> switch_to(TcpState next_state);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
     TCP_LOCK_REQUIRED void start_time_wait_timer();
+    void publish_transition(std::optional<TcpStateTransition> transition);
     void receive_user_data(const TcpSegment& header, const SocketBuffer& payload);
     virtual void notify_state_update(TcpState prev, TcpState next) const {}
-    co_async<> time_wait_timer(std::shared_ptr<std::atomic_bool> cancelled);
+    static co_async<> time_wait_timer(std::shared_ptr<TcpSession> session);
     void on_retransmission_failed() override;
 
 protected:
@@ -104,6 +119,10 @@ protected:
     TcpState process_tcp_segment_in_last_ack_state(const TcpSegment& header, const SocketBuffer& payload);
     TcpState process_tcp_segment_in_time_wait_state(const TcpSegment& header, const SocketBuffer& payload);
     TcpState process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload);
+
+    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> process_tcp_reset(const TcpSegment& header);
+    TCP_LOCK_REQUIRED bool verify_reset_sequence(uint32_t seq_num);
+    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> abort_session(int err);
 
 protected:
     static constexpr std::chrono::seconds MaximumSegmentLifetime{TCP_MAX_SEGMENT_LIFETIME};
@@ -128,7 +147,7 @@ protected:
     TcpReceiveWindow receive_window;
 };
 
-class TcpConnectSession : public TcpSession, public std::enable_shared_from_this<TcpConnectSession> {
+class TcpConnectSession : public TcpSession {
 public:
     TcpConnectSession(TcpManager* manager, TcpState s, const TcpSocketHandle& handle)
         : TcpSession(manager, s, handle.local, handle.remote)
@@ -145,7 +164,7 @@ public:
 
     ~TcpConnectSession() override = default;
 
-    UserSocketContext* take_waiter()
+    UserSocketContext* take_waiter() override
     {
         return waiter.exchange(nullptr, std::memory_order_acq_rel);
     }
@@ -159,6 +178,11 @@ public:
 
         UserSocketContext* expected = nullptr;
         waiter.compare_exchange_strong(expected, ctx, std::memory_order_acq_rel);
+    }
+
+    UserSocketContext* peek_waiter() const override
+    {
+        return waiter.load(std::memory_order_acquire);
     }
 
 private:
@@ -175,8 +199,14 @@ public:
 
     ~TcpListenSession() override
     {
-        std::lock_guard lock(accept_mutex);
-        for (auto [_, session]: accept_queue)
+        std::map<SocketAddress, std::shared_ptr<TcpConnectSession>> pending;
+        //
+        {
+            std::lock_guard lock(accept_mutex);
+            pending.swap(accept_queue);
+        }
+
+        for (auto& [_, session]: pending)
         {
             session->close();
         }

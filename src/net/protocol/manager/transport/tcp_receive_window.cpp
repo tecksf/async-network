@@ -3,8 +3,8 @@
 namespace coro::net::trans {
 
 
-TcpReceiveWindow::TcpReceiveWindow(app::ApplicationService* app, trans::TransportService* trans, std::shared_ptr<spdlog::logger> logger)
-    : app(app), trans(trans), logger(logger)
+TcpReceiveWindow::TcpReceiveWindow(std::shared_ptr<spdlog::logger> logger)
+    : logger(logger)
 {
 }
 

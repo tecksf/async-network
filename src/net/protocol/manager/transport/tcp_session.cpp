@@ -15,7 +15,7 @@ TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& loc
       local(local),
       remote(remote),
       send_window(manager->get_app(), manager->get_trans(), this, remote.ip, logger),
-      receive_window(manager->get_app(), manager->get_trans(), logger)
+      receive_window(logger)
 {
     state = s;
     logger->debug("===> TCP session [{0}] created, State: {1}", session_id, get_state_name(s));
@@ -49,22 +49,20 @@ bool TcpSession::is_readable() const
            TcpState::CloseWait;
 }
 
-bool TcpSession::has_readable_data() const
+std::pair<bool, bool> TcpSession::get_read_status() const
 {
     std::lock_guard lock(session_mutex);
-    return receive_window.has_readable_data();
+    bool readable = receive_window.has_readable_data();
+    bool eof = receive_window.is_eof();
+    return std::pair{readable, eof};
 }
 
-bool TcpSession::is_eof() const
+std::pair<size_t, bool> TcpSession::read_into(std::span<uint8_t> out)
 {
     std::lock_guard lock(session_mutex);
-    return receive_window.is_eof();
-}
-
-size_t TcpSession::read_into(std::span<uint8_t> out)
-{
-    std::lock_guard lock(session_mutex);
-    return receive_window.read_into(out);
+    size_t count = receive_window.read_into(out);
+    bool eof = receive_window.is_eof();
+    return std::pair{count, eof};
 }
 
 bool TcpSession::is_closed() const
@@ -99,7 +97,15 @@ TcpSocketHandle TcpSession::get_socket_handle() const
 
 void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
 {
-    std::lock_guard lock(session_mutex);
+    std::unique_lock mutex(session_mutex);
+
+    if (header.is_reset())
+    {
+        auto transition = process_tcp_reset(header);
+        mutex.unlock();
+        publish_transition(transition);
+        return;
+    }
 
     if (header.is_ack())
     {
@@ -147,15 +153,18 @@ void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffe
             logger->error("Unknown TCP State: {}", get_string_state());
     }
 
-    switch_to(next_state);
+    auto transition = switch_to(next_state);
+    mutex.unlock();
+
+    publish_transition(transition);
 }
 
-void TcpSession::switch_to(TcpState next_state)
+std::optional<TcpStateTransition> TcpSession::switch_to(TcpState next_state)
 {
     const TcpState prev_state = state.load(std::memory_order_relaxed);
     if (prev_state == next_state)
     {
-        return;
+        return std::nullopt;
     }
 
     state.store(next_state, std::memory_order_release);
@@ -167,10 +176,19 @@ void TcpSession::switch_to(TcpState next_state)
     {
         start_time_wait_timer();
     }
-    else if (next_state == TcpState::Closed)
+
+    return TcpStateTransition{.prev = prev_state, .next = next_state};
+}
+
+void TcpSession::publish_transition(std::optional<TcpStateTransition> transition)
+{
+    // must be called with session_mutex released: the event handler re-acquires it to check readable data / EOF.
+    if (not transition.has_value())
     {
-        session_events->on_session_closed(prev_state, get_socket_handle());
+        return;
     }
+
+    session_events->on_session_state_changed(*this, transition.value());
 }
 
 TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload)
@@ -369,6 +387,84 @@ TcpState TcpSession::process_tcp_segment_in_closed_state(const TcpSegment& heade
     return state;
 }
 
+std::optional<TcpStateTransition> TcpSession::process_tcp_reset(const TcpSegment& header)
+{
+    const TcpState current = state.load(std::memory_order_relaxed);
+
+    switch (current)
+    {
+        case TcpState::Listen:
+        case TcpState::Closed:
+            logger->warn("{} received RST, will ignore...", get_string_state());
+            break;
+        case TcpState::TimeWait:
+            logger->warn("{} received RST, will ignore to protect the 2MSL timer", get_string_state());
+            break;
+        case TcpState::SynSent:
+            if (not header.contains(TcpSegment::FLAG_ACK) or header.get_ack_number() != sequence_number)
+            {
+                logger->warn("{} received invalid RST during active open, will ignore...", get_string_state());
+                break;
+            }
+
+            logger->warn("===> TCP session [{0}] active open refused by remote port {1} (RST)", session_id, remote.port);
+            return abort_session(-ECONNREFUSED);
+        case TcpState::SynReceived:
+            break;
+        case TcpState::Established:
+        case TcpState::FinWait1:
+        case TcpState::FinWait2:
+        case TcpState::CloseWait:
+        case TcpState::Closing:
+        case TcpState::LastAck:
+            if (not verify_reset_sequence(header.get_sequence_number()))
+            {
+                break;
+            }
+            return abort_session(-ECONNRESET);
+        default:
+            logger->warn("{} received RST in unexpected state, will ignore...", get_string_state());
+    }
+
+    return std::nullopt;
+}
+
+bool TcpSession::verify_reset_sequence(uint32_t seq_num)
+{
+    const uint32_t expected = receive_window.get_next_expected_sequence();
+    if (seq_num == expected)
+    {
+        return true;
+    }
+
+    const uint32_t window_size = TcpReceiveWindow::MaxReceiveWindowSize - receive_window.already_used_bytes();
+    if (seq_num > expected and seq_num < expected + window_size)
+    {
+        logger->warn("{} received in-window RST (seq: {}, expect: {}), sending challenge ACK", get_string_state(), seq_num, expected);
+
+        auto outbound = app->allocate_socket_buffer();
+        send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+        return false;
+    }
+
+    logger->warn("{} received out-of-window RST (seq: {}, expect: {}), will ignore...", get_string_state(), seq_num, expected);
+    return false;
+}
+
+std::optional<TcpStateTransition> TcpSession::abort_session(int err)
+{
+    logger->warn("===> TCP session [{0}] aborted by peer (RST), State: {1} --> Closed", session_id, get_string_state());
+    send_window.cancel_pending_segments();
+
+    auto transition = switch_to(TcpState::Closed);
+    if (transition)
+    {
+        transition->error = err;
+    }
+
+    return transition;
+}
+
 void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size)
 {
     SocketBuffer outbound = payload;
@@ -431,30 +527,36 @@ void TcpSession::start_time_wait_timer()
     }
 
     time_wait_cancelled = std::make_shared<std::atomic_bool>(false);
-    app->sumit_task(time_wait_timer(time_wait_cancelled));
+    app->sumit_task(time_wait_timer(shared_from_this()));
 }
 
-co_async<> TcpSession::time_wait_timer(std::shared_ptr<std::atomic_bool> cancelled)
+co_async<> TcpSession::time_wait_timer(std::shared_ptr<TcpSession> session)
 {
     co_await coro::sleep(TimeWaitTimeout);
-    if (cancelled->load(std::memory_order_acquire))
+    if (session->time_wait_cancelled->load(std::memory_order_acquire))
     {
         co_return;
     }
 
-    std::lock_guard lock(session_mutex);
-    switch_to(TcpState::Closed);
+    std::optional<TcpStateTransition> transition;
+    //
+    {
+        std::lock_guard lock(session->session_mutex);
+        transition = session->switch_to(TcpState::Closed);
+    }
+
+    session->publish_transition(transition);
 }
 
 void TcpSession::on_retransmission_failed()
 {
     logger->error("===> TCP session [{0}] segment retransmission failed on remote port {1}, closing session", session_id, remote.port);
-    close();
+    close(-ETIMEDOUT);
 }
 
-void TcpSession::close()
+void TcpSession::close(int error)
 {
-    std::lock_guard lock(session_mutex);
+    std::unique_lock mutex(session_mutex);
 
     auto send_fin_segment = [this]() {
         auto outbound = app->allocate_socket_buffer();
@@ -475,6 +577,7 @@ void TcpSession::close()
             next_state = TcpState::FinWait1;
             break;
         case TcpState::SynSent:
+            send_window.cancel_pending_segments();
             next_state = TcpState::Closed;
             break;
         case TcpState::Established:
@@ -494,7 +597,16 @@ void TcpSession::close()
         default:
             break;
     }
-    switch_to(next_state);
+
+    std::optional<TcpStateTransition> transition = switch_to(next_state);
+
+    if (transition and transition->next == TcpState::Closed)
+    {
+        transition->error = error != 0 ? error : -ECONNABORTED;
+    }
+
+    mutex.unlock();
+    publish_transition(transition);
 }
 
 }

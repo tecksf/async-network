@@ -148,6 +148,11 @@ public:
         return contains(FLAG_ACK);
     }
 
+    bool is_reset() const
+    {
+        return contains(FLAG_RST);
+    }
+
     void set_source_port(uint16_t port)
     {
         source_port[0] = (port & 0xff00) >> 8;
