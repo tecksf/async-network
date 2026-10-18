@@ -23,6 +23,32 @@ uint32_t TcpReceiveWindow::get_next_expected_sequence() const
     return next_expected_sequence;
 }
 
+uint16_t TcpReceiveWindow::available_window() const
+{
+    return static_cast<uint16_t>(MaxReceiveWindowSize - used_bytes);
+}
+
+bool TcpReceiveWindow::need_window_update(uint32_t threshold) const
+{
+    const uint32_t available = available_window();
+    if (available == 0)
+    {
+        return false;
+    }
+
+    if (advertised_window_size == 0)
+    {
+        return true;
+    }
+
+    return available >= advertised_window_size + threshold;
+}
+
+void TcpReceiveWindow::mark_window_advertised()
+{
+    advertised_window_size = available_window();
+}
+
 bool TcpReceiveWindow::has_readable_data() const
 {
     if (buffer.empty())

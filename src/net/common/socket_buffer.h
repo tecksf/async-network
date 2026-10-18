@@ -147,6 +147,7 @@ public:
     SocketBuffer& operator=(SocketBuffer&& other) noexcept = default;
 
     static SocketBuffer reuse_for_outbound(const SocketBuffer& inbound);
+    static SocketBuffer make_outbound_view(uint8_t* ptr, size_t capacity);
     SocketBuffer clone() const;
     SocketBufferInterface* operator->() const;
     SocketBufferInterface& operator*() const;

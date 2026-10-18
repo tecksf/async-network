@@ -101,7 +101,7 @@ TcpConnectSession::TcpConnectSession(TcpManager* manager, TcpState s, const TcpS
 
         auto outbound = app->allocate_socket_buffer();
         constexpr TcpOptionSet options{.mss = TCP_DEFAULT_MSS};
-        send_tcp_segment(outbound, TcpSegment::FLAG_SYN, TCP_WINDOW_SIZE, options);
+        send_tcp_segment(outbound, TcpSegment::FLAG_SYN, options);
 
         sequence_number += 1;
     }

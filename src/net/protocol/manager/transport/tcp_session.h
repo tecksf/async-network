@@ -105,8 +105,16 @@ public:
 
 protected:
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> switch_to(TcpState next_state);
-    TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size = TCP_WINDOW_SIZE);
-    TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size, const TcpOptionSet& options);
+    TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag);
+    TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, const TcpOptionSet& options);
+    TCP_LOCK_REQUIRED SocketBuffer compose_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint32_t sequence,
+                                                       const TcpOptionSet* options = nullptr);
+    TCP_LOCK_REQUIRED void send_window_update();
+    TCP_LOCK_REQUIRED void start_persist_probe();
+    TCP_LOCK_REQUIRED void stop_persist_probe();
+    TCP_LOCK_REQUIRED void send_persist_probe(const SocketBuffer& payload);
+    static co_async<> persist_probe_timer(std::shared_ptr<TcpSession> session,
+                                          std::shared_ptr<std::atomic<bool>> cancelled);
     TCP_LOCK_REQUIRED void start_time_wait_timer();
     void publish_transition(std::optional<TcpStateTransition> transition);
     void receive_user_data(const TcpSegment& header, const SocketBuffer& payload);
@@ -137,6 +145,11 @@ protected:
     static constexpr std::chrono::seconds MaximumSegmentLifetime{TCP_MAX_SEGMENT_LIFETIME};
     static constexpr std::chrono::seconds TimeWaitTimeout{MaximumSegmentLifetime * 2};
 
+    // First interval and upper bound of zero-window probing: a lost window update is recovered
+    // within 1s, while a peer that keeps not reading backs off to one probe per 60s
+    static constexpr std::chrono::seconds InitialPersistProbeInterval{1};
+    static constexpr std::chrono::seconds MaxPersistProbeInterval{60};
+
     app::ApplicationService* app;
     trans::TransportService* trans;
     std::shared_ptr<spdlog::logger> logger;
@@ -156,6 +169,7 @@ protected:
     std::atomic<uint32_t> peer_mss{TCP_MIN_MSS};
 
     std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
+    std::shared_ptr<std::atomic<bool>> persist_cancelled = nullptr;
     TcpSendWindow send_window;
     TcpReceiveWindow receive_window;
 };

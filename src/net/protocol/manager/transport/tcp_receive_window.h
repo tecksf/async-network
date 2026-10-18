@@ -32,6 +32,9 @@ public:
     size_t read_into(std::span<uint8_t> out);
     void acknowledge_finish_sequence(uint32_t seq);
     bool reassemble(uint32_t seq_number, const SocketBuffer& payload);
+    uint16_t available_window() const;
+    bool need_window_update(uint32_t threshold) const;
+    void mark_window_advertised();
 
     static constexpr uint32_t MaxReceiveWindowSize = TCP_WINDOW_SIZE;
 
@@ -62,6 +65,7 @@ private:
     uint32_t next_expected_sequence = 0;
     uint32_t read_sequence = 0;
     uint32_t used_bytes = 0;
+    uint32_t advertised_window_size = MaxReceiveWindowSize;
     std::optional<uint32_t> finish_sequence;
     std::set<Segment, Segment::Less> buffer;
 };

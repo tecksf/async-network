@@ -21,11 +21,12 @@ void TcpSendWindow::push_outbound(const TcpSegment& segment, const SocketBuffer&
 {
     const uint32_t seq_num = segment.get_sequence_number();
     const uint32_t seq_len = segment.get_sequence_len();
+    const std::span<uint8_t> payload = segment.get_payload();
 
     if (not initialized)
     {
         unacknowledged = seq_num;
-        next_sequence = seq_len;
+        next_sequence = seq_num;
         initialized = true;
     }
 
@@ -38,15 +39,109 @@ void TcpSendWindow::push_outbound(const TcpSegment& segment, const SocketBuffer&
         return;
     }
 
-    auto entry = std::make_shared<TcpInFlightSegment>(next_segment_id++, seq_num, seq_len, outbound);
+    // SYN/FIN segments carry no data byte, so they never qualify as probe targets
+    std::optional<uint8_t> first_byte;
+    if (not payload.empty())
+    {
+        first_byte = payload.front();
+    }
+
+    auto entry = std::make_shared<TcpInFlightSegment>(next_segment_id++, seq_num, seq_len, outbound, first_byte);
     pending.push_back(entry);
 
     dispatch_pending_outbounds();
 }
 
+void TcpSendWindow::update_peer_window(uint16_t window, uint32_t segment_sequence, uint32_t segment_ack)
+{
+    // An ack beyond the sent range must not move the window, unless it acknowledges the probe
+    // byte we sent (one byte past next_sequence)
+    if (initialized and segment_ack > next_sequence and not tolerates_probe_ack(segment_ack))
+    {
+        return;
+    }
+
+    const uint32_t updated = std::min<uint32_t>(window, TCP_WINDOW_SIZE);
+
+    // Only a segment fresher than the last update may change the window, otherwise the state
+    // could go backwards:
+    // 1) the ack number advanced - this is the peer's latest acknowledgement, so the window is valid;
+    // 2) the segment sequence is later than the last window update - the peer only advertises this
+    //    window after processing newer data;
+    // 3) same sequence but the window grew or was advertised as 0 - window updates and zero-window
+    //    notifications must always be accepted, otherwise the connection would stall forever.
+    const bool fresh = not window_update_valid
+                       or segment_ack > unacknowledged
+                       or segment_sequence > last_window_update_sequence
+                       or (segment_sequence == last_window_update_sequence and (updated > peer_window or updated == 0));
+    if (not fresh)
+    {
+        return;
+    }
+
+    window_update_valid = true;
+    last_window_update_sequence = segment_sequence;
+
+    if (updated == peer_window)
+    {
+        return;
+    }
+
+    const bool opened = updated > peer_window;
+    peer_window = updated;
+
+    if (opened)
+    {
+        dispatch_pending_outbounds();
+    }
+}
+
+std::optional<TcpProbeTarget> TcpSendWindow::probe_target() const
+{
+    if (pending.empty() or available_peer_window() != 0)
+    {
+        return std::nullopt;
+    }
+
+    const auto& entry = pending.front();
+    if (not entry->first_payload_byte.has_value())
+    {
+        return std::nullopt; // a pure ACK / FIN segment carries no probe-able data byte
+    }
+
+    return TcpProbeTarget{
+        .sequence_number = entry->sequence_number,
+        .first_payload_byte = entry->first_payload_byte.value()
+    };
+}
+
+void TcpSendWindow::note_probe_sent(uint32_t sequence)
+{
+    last_probe_sequence = sequence;
+}
+
+bool TcpSendWindow::tolerates_probe_ack(uint32_t ack_number) const
+{
+    // Whether this ack acknowledges the probe byte we sent: only true while the probe byte is still
+    // at the head of the queue (next_sequence has not advanced). Once the head segment is actually
+    // sent, next_sequence moves past it and this tolerance stops applying.
+    return last_probe_sequence.has_value() and
+           last_probe_sequence.value() == next_sequence and
+           ack_number == next_sequence + 1;
+}
+
 void TcpSendWindow::acknowledge(uint32_t ack_number)
 {
-    if (not initialized or ack_number < unacknowledged)
+    // The probe byte was accepted by the peer: let through only the window information it carries
+    // (handled by update_peer_window) and do not advance unacknowledged - the probe does not consume
+    // sequence space, so the head segment is resent in full afterwards and the peer trims this
+    // single byte as a left overlap.
+    if (tolerates_probe_ack(ack_number))
+    {
+        return;
+    }
+
+    if (not initialized or ack_number < unacknowledged or ack_number > next_sequence)
     {
         return;
     }
@@ -84,7 +179,7 @@ void TcpSendWindow::dispatch_pending_outbounds()
     while (not pending.empty())
     {
         auto entry = pending.front();
-        if (entry->sequence_length > usable_window())
+        if (entry->sequence_length > available_peer_window())
         {
             break;
         }
@@ -118,6 +213,7 @@ void TcpSendWindow::cancel_pending_segments()
 
     in_flight.clear();
     pending.clear();
+    last_probe_sequence.reset();
 }
 
 co_async<> TcpSendWindow::retransmit_segment(std::shared_ptr<TcpInFlightSegment> segment) const

@@ -63,6 +63,12 @@ std::pair<size_t, bool> TcpSession::read_into(std::span<uint8_t> out)
     std::lock_guard lock(session_mutex);
     size_t count = receive_window.read_into(out);
     bool eof = receive_window.is_eof();
+
+    if (count > 0 and is_readable() and receive_window.need_window_update(get_send_mss()))
+    {
+        send_window_update();
+    }
+
     return std::pair{count, eof};
 }
 
@@ -130,7 +136,10 @@ void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffe
 
     if (header.is_ack())
     {
+        send_window.update_peer_window(header.get_window_size(), header.get_sequence_number(), header.get_ack_number());
         send_window.acknowledge(header.get_ack_number());
+        // The window may have just closed: if data is still queued, start zero-window probing as a fallback
+        start_persist_probe();
     }
 
     const TcpState current = state.load(std::memory_order_relaxed);
@@ -226,8 +235,8 @@ TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& heade
     set_peer_mss(header.get_all_options().mss.value_or(TCP_MIN_MSS));
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
-    const TcpOptionSet options{.mss = static_cast<uint16_t>(TCP_DEFAULT_MSS)};
-    send_tcp_segment(outbound, TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK, TCP_WINDOW_SIZE, options);
+    constexpr TcpOptionSet options{.mss = TCP_DEFAULT_MSS};
+    send_tcp_segment(outbound, TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK, options);
 
     sequence_number += 1;
 
@@ -481,6 +490,7 @@ bool TcpSession::verify_reset_sequence(uint32_t seq_num)
 std::optional<TcpStateTransition> TcpSession::abort_session(int err)
 {
     logger->warn("===> TCP session [{0}] aborted by peer (RST), State: {1} --> Closed", session_id, get_string_state());
+    stop_persist_probe();
     send_window.cancel_pending_segments();
 
     auto transition = switch_to(TcpState::Closed);
@@ -492,37 +502,16 @@ std::optional<TcpStateTransition> TcpSession::abort_session(int err)
     return transition;
 }
 
-void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size)
-{
-    SocketBuffer outbound = payload;
-    auto text = outbound->allocate(TcpSegment::HeaderSize);
-
-    TcpSegment segment(text, true);
-    segment.set_source_port(local.port);
-    segment.set_destination_port(remote.port);
-    segment.set_sequence_number(sequence_number);
-    segment.set_ack_number(receive_window.get_next_expected_sequence());
-    segment.set_flag(flag);
-    segment.set_header_len(TcpSegment::HeaderSize);
-    segment.set_window_size(window_size);
-
-    FakeHeader fake_header;
-    fake_header.set_source_ip(local.ip);
-    fake_header.set_destination_ip(remote.ip);
-    fake_header.set_protocol(Protocol::TCP);
-    fake_header.set_length(TcpSegment::HeaderSize + payload->size());
-    segment.seal(fake_header, outbound);
-
-    sequence_number += payload->size();
-
-    send_window.push_outbound(segment, outbound);
-}
-
-void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint16_t window_size, const TcpOptionSet& options)
+SocketBuffer TcpSession::compose_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint32_t sequence,
+                                             const TcpOptionSet* options)
 {
     std::array<uint8_t, TcpOption::MaximumOptionSize> option_data{};
-    TcpOption option(option_data, true);
-    const size_t option_size = option.add_options(options);
+    size_t option_size = 0;
+    if (options != nullptr)
+    {
+        TcpOption option(option_data, true);
+        option_size = option.add_options(*options);
+    }
 
     SocketBuffer outbound = payload;
     const size_t header_size = TcpSegment::HeaderSize + option_size;
@@ -531,11 +520,12 @@ void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uin
     TcpSegment segment(text, true);
     segment.set_source_port(local.port);
     segment.set_destination_port(remote.port);
-    segment.set_sequence_number(sequence_number);
+    segment.set_sequence_number(sequence);
     segment.set_ack_number(receive_window.get_next_expected_sequence());
     segment.set_flag(flag);
     segment.set_header_len(static_cast<uint8_t>(header_size));
-    segment.set_window_size(window_size);
+    segment.set_window_size(receive_window.available_window());
+    receive_window.mark_window_advertised();
     if (option_size > 0)
     {
         std::ranges::copy_n(option_data.begin(), option_size, segment.get_options().begin());
@@ -548,9 +538,127 @@ void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, uin
     fake_header.set_length(header_size + payload->size());
     segment.seal(fake_header, outbound);
 
+    return outbound;
+}
+
+void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag)
+{
+    send_tcp_segment(payload, flag, TcpOptionSet{});
+}
+
+void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, const TcpOptionSet& options)
+{
+    SocketBuffer outbound = compose_tcp_segment(payload, flag, sequence_number, &options);
     sequence_number += payload->size();
 
+    // TODO: this must use a parse view rather than a create view: a TcpSegment in create mode does not
+    // know how long the payload is, so get_sequence_len() is always 0 and the segment would be sent as a
+    // pure ACK - occupying no window and never being retransmitted.
+    TcpSegment segment(outbound->get_header_payload());
     send_window.push_outbound(segment, outbound);
+}
+
+void TcpSession::send_window_update()
+{
+    auto outbound = app->allocate_socket_buffer();
+    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+    logger->debug("===> TCP session [{0}] window update sent, available window: {1}", session_id,
+                  receive_window.available_window());
+}
+
+void TcpSession::start_persist_probe()
+{
+    if (persist_cancelled or not is_writable() or not send_window.probe_target().has_value())
+    {
+        return;
+    }
+
+    persist_cancelled = std::make_shared<std::atomic_bool>(false);
+    app->sumit_task(persist_probe_timer(shared_from_this(), persist_cancelled));
+}
+
+void TcpSession::stop_persist_probe()
+{
+    if (persist_cancelled)
+    {
+        persist_cancelled->store(true, std::memory_order_release);
+        persist_cancelled.reset();
+    }
+}
+
+co_async<> TcpSession::persist_probe_timer(std::shared_ptr<TcpSession> session,
+                                           std::shared_ptr<std::atomic<bool>> cancelled)
+{
+    constexpr size_t probe_size = ETHERNET_HEADER_SIZE + IP_V4_HEADER_SIZE + TCP_HEADER_SIZE + 1;
+    uint8_t probe_buffer[probe_size];
+
+    auto interval = InitialPersistProbeInterval;
+    while (true)
+    {
+        co_await coro::sleep(interval);
+
+        if (cancelled->load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+
+        bool blocked = false;
+        //
+        {
+            std::lock_guard lock(session->session_mutex);
+            blocked = session->is_writable() and session->send_window.probe_target().has_value();
+            if (blocked)
+            {
+                session->send_persist_probe(SocketBuffer::make_outbound_view(probe_buffer, probe_size));
+            }
+            else if (session->persist_cancelled == cancelled)
+            {
+                // The window reopened or the queue drained: release the token so probing can start
+                // again the next time progress is blocked
+                session->persist_cancelled.reset();
+            }
+        }
+
+        if (not blocked)
+        {
+            co_return;
+        }
+
+        interval = std::min(interval * 2, MaxPersistProbeInterval);
+    }
+}
+
+void TcpSession::send_persist_probe(const SocketBuffer& payload)
+{
+    const auto target = send_window.probe_target();
+    if (not target.has_value())
+    {
+        return;
+    }
+
+    auto data = payload->allocate(1);
+    if (data.empty())
+    {
+        return;
+    }
+    data[0] = target->first_payload_byte;
+
+    // The probe sends one byte at the sequence number of the head segment, deliberately crossing the
+    // closed window: the peer either rejects it and replies with a duplicate ACK carrying the latest
+    // window, or accepts the byte (the window was actually open). The probe does not enter the send
+    // window queue and does not consume local sequence space, so when it is accepted the peer's ack
+    // number is one byte past next_sequence; record the probe sequence so the send window can tolerate
+    // that byte and recover the window information, otherwise the connection would stay stuck at a
+    // zero window.
+    SocketBuffer outbound = compose_tcp_segment(payload, TcpSegment::FLAG_ACK | TcpSegment::FLAG_PSH, target->sequence_number);
+    TcpContext context{};
+    context.ip = remote.ip;
+    context.protocol = Protocol::TCP;
+    send_window.note_probe_sent(target->sequence_number);
+
+    app->sumit_task(trans->async_send_tcp_segment(outbound, context));
+
+    logger->debug("===> TCP session [{0}] zero window probe sent at seq {1}", session_id, target->sequence_number);
 }
 
 int TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
@@ -569,6 +677,8 @@ int TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
         bytes_sent += static_cast<int>(payload->size());
         send_tcp_segment(payload, TcpSegment::FLAG_ACK | TcpSegment::FLAG_PSH);
     }
+
+    start_persist_probe();
 
     return bytes_sent;
 }
@@ -619,6 +729,8 @@ void TcpSession::on_retransmission_failed()
 void TcpSession::close(int error)
 {
     std::unique_lock mutex(session_mutex);
+
+    stop_persist_probe();
 
     auto send_fin_segment = [this]() {
         auto outbound = app->allocate_socket_buffer();

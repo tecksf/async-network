@@ -70,6 +70,12 @@ SocketBuffer SocketBuffer::reuse_for_outbound(const SocketBuffer& inbound)
     return outbound;
 }
 
+SocketBuffer SocketBuffer::make_outbound_view(uint8_t* ptr, size_t capacity)
+{
+    auto outbound = SocketBuffer(std::make_shared<SocketBufferImpl>(ptr, capacity, std::nullopt));
+    return outbound;
+}
+
 SocketBuffer SocketBuffer::clone() const
 {
     return impl ? SocketBuffer(impl->clone()) : SocketBuffer{};
