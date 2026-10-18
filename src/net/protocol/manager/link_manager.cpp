@@ -186,7 +186,7 @@ co_async<> LinkManager::async_send_arp_packet(const SocketBuffer& outbound, cons
 co_async<> LinkManager::async_send_arp_request_operation(IpAddress ip) const
 {
     uint8_t data[64];
-    SocketBuffer outbound(std::make_shared<SocketBufferImpl>(data, 64, std::nullopt));
+    SocketBuffer outbound = SocketBuffer::make_outbound_view(data, sizeof(data));
     ArpContext context;
     context.protocol = Protocol::ARP;
     context.operate_code = ArpPacket::RequestOperation;
