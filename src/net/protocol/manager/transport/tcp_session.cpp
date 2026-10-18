@@ -122,16 +122,13 @@ void TcpSession::update_peer_mss(const TcpSegment& header)
     }
 }
 
-void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
+TcpSessionResult TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
 {
-    std::unique_lock mutex(session_mutex);
+    std::lock_guard guard(session_mutex);
 
     if (header.is_reset())
     {
-        auto transition = process_tcp_reset(header);
-        mutex.unlock();
-        publish_transition(transition);
-        return;
+        return fill_session_result(process_tcp_reset(header));
     }
 
     if (header.is_ack())
@@ -183,10 +180,7 @@ void TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffe
             logger->error("Unknown TCP State: {}", get_string_state());
     }
 
-    auto transition = switch_to(next_state);
-    mutex.unlock();
-
-    publish_transition(transition);
+    return fill_session_result(switch_to(next_state));
 }
 
 std::optional<TcpStateTransition> TcpSession::switch_to(TcpState next_state)
@@ -200,25 +194,45 @@ std::optional<TcpStateTransition> TcpSession::switch_to(TcpState next_state)
     state.store(next_state, std::memory_order_release);
     logger->debug("===> TCP session [{0}] State change: {1} --> {2}", session_id, get_state_name(prev_state), get_state_name(next_state));
 
-    notify_state_update(prev_state, next_state);
-
-    if (next_state == TcpState::TimeWait)
-    {
-        start_time_wait_timer();
-    }
-
     return TcpStateTransition{.prev = prev_state, .next = next_state};
 }
 
-void TcpSession::publish_transition(std::optional<TcpStateTransition> transition)
+TcpSessionResult TcpSession::fill_session_result(const std::optional<TcpStateTransition>& transition)
 {
-    // must be called with session_mutex released: the event handler re-acquires it to check readable data / EOF.
-    if (not transition.has_value())
+    TcpSessionResult result;
+
+    if (transition.has_value())
     {
-        return;
+        const auto tran = transition.value();
+        if (tran.next == TcpState::Established)
+        {
+            result.kind = TcpSessionResult::Kind::Connected;
+        }
+        else if (tran.next == TcpState::Closed)
+        {
+            result.kind = TcpSessionResult::Kind::Closed;
+            result.error = tran.error;
+        }
     }
 
-    session_events->on_session_state_changed(*this, transition.value());
+    if (result.kind == TcpSessionResult::Kind::None and is_readable())
+    {
+        if (receive_window.has_readable_data())
+        {
+            result.kind = TcpSessionResult::Kind::Readable;
+        }
+        else if (receive_window.is_eof())
+        {
+            result.kind = TcpSessionResult::Kind::EndOfStream;
+        }
+    }
+
+    if (result.kind != TcpSessionResult::Kind::None)
+    {
+        result.waiter = take_waiter();
+    }
+
+    return result;
 }
 
 TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload)
@@ -362,6 +376,8 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+
+    start_time_wait_timer();
 
     return TcpState::TimeWait;
 }
@@ -690,43 +706,58 @@ void TcpSession::receive_user_data(const TcpSegment& header, const SocketBuffer&
 
 void TcpSession::start_time_wait_timer()
 {
-    logger->debug("===> TCP session [{0}] Entering TimeWait, will wait {1}s (2MSL) before closing",
-                  session_id, TimeWaitTimeout.count());
-
     if (time_wait_cancelled)
     {
         time_wait_cancelled->store(true, std::memory_order_release);
     }
 
-    time_wait_cancelled = std::make_shared<std::atomic_bool>(false);
-    app->sumit_task(time_wait_timer(shared_from_this()));
+    auto token = std::make_shared<std::atomic_bool>(false);
+    time_wait_cancelled = token;
+    app->sumit_task(time_wait_timer(shared_from_this(), token));
 }
 
-co_async<> TcpSession::time_wait_timer(std::shared_ptr<TcpSession> session)
+co_async<> TcpSession::time_wait_timer(std::shared_ptr<TcpSession> session, std::shared_ptr<std::atomic_bool> token)
 {
+    session->logger->debug("===> TCP session [{0}] Enter TimeWait, will wait {1}s (2MSL) before closing",
+                           session->session_id, TimeWaitTimeout.count());
+
     co_await coro::sleep(TimeWaitTimeout);
-    if (session->time_wait_cancelled->load(std::memory_order_acquire))
+    if (token->load(std::memory_order_acquire))
     {
         co_return;
     }
 
-    std::optional<TcpStateTransition> transition;
+    bool superseded = false;
     //
     {
         std::lock_guard lock(session->session_mutex);
-        transition = session->switch_to(TcpState::Closed);
+
+        superseded = session->time_wait_cancelled != token;
+        if (not superseded)
+        {
+            session->switch_to(TcpState::Closed);
+        }
     }
 
-    session->publish_transition(transition);
+    if (not superseded)
+    {
+        session->logger->debug("===> TCP session [{0}] TimeWait timer expired, closing session", session->session_id);
+        session->session_events->on_session_closed(session);
+    }
 }
 
 void TcpSession::on_retransmission_failed()
 {
     logger->error("===> TCP session [{0}] segment retransmission failed on remote port {1}, closing session", session_id, remote.port);
     close(-ETIMEDOUT);
+
+    if (is_closed())
+    {
+        session_events->on_session_closed(shared_from_this());
+    }
 }
 
-void TcpSession::close(int error)
+std::optional<TcpStateTransition> TcpSession::close(int error)
 {
     std::unique_lock mutex(session_mutex);
 
@@ -773,14 +804,13 @@ void TcpSession::close(int error)
     }
 
     std::optional<TcpStateTransition> transition = switch_to(next_state);
-
     if (transition and transition->next == TcpState::Closed)
     {
-        transition->error = error != 0 ? error : -ECONNABORTED;
+        transition->error = error;
+        closed_reason = error;
     }
 
-    mutex.unlock();
-    publish_transition(transition);
+    return transition;
 }
 
 }

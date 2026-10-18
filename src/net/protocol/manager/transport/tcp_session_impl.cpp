@@ -1,5 +1,4 @@
 #include "tcp_session.h"
-#include "tcp_manager.h"
 #include <algorithm>
 #include <cassert>
 #include <common/encoding.h>
@@ -118,25 +117,55 @@ void TcpConnectSession::restore_syn_cookie_state(std::uint32_t server_isn, std::
 
 UserSocketContext* TcpConnectSession::take_waiter()
 {
-    return waiter.exchange(nullptr, std::memory_order_acq_rel);
+    auto w = waiter;
+    waiter = nullptr;
+    return w;
 }
 
-void TcpConnectSession::add_waiter(UserSocketContext* ctx)
+TcpSessionResult TcpConnectSession::try_to_add_connect_waiter(UserSocketContext* ctx)
 {
+    TcpSessionResult result;
     if (ctx == nullptr)
     {
-        return;
+        return result;
     }
 
-    UserSocketContext* expected = nullptr;
-    waiter.compare_exchange_strong(expected, ctx, std::memory_order_acq_rel);
+    std::lock_guard lock(session_mutex);
+    TcpStateTransition transition = {state, state};
+    result = fill_session_result(transition);
+    if (result.is_nothing_to_do())
+    {
+        this->waiter = ctx;
+    }
+    else
+    {
+        result.waiter = ctx;
+    }
+    return result;
 }
 
-UserSocketContext* TcpConnectSession::peek_waiter() const
+TcpSessionResult TcpConnectSession::try_to_add_read_waiter(UserSocketContext* ctx)
 {
-    return waiter.load(std::memory_order_acquire);
-}
+    TcpSessionResult result;
+    if (ctx == nullptr)
+    {
+        return result;
+    }
 
+    std::lock_guard lock(session_mutex);
+
+    result = fill_session_result(std::nullopt);
+    if (result.is_nothing_to_do())
+    {
+        this->waiter = ctx;
+    }
+    else
+    {
+        result.waiter = ctx;
+    }
+
+    return result;
+}
 
 TcpListenSession::TcpListenSession(TcpManager* manager, const SocketAddress& local)
     : TcpSession(manager, TcpState::Listen, local, SocketAddress{}),
@@ -191,7 +220,7 @@ void TcpListenSession::remove_accept_session(const SocketAddress& client)
     accept_queue.erase(client);
 }
 
-void TcpListenSession::add_waiter(UserSocketContext* ctx)
+void TcpListenSession::add_listen_waiter(UserSocketContext* ctx)
 {
     if (ctx == nullptr)
     {

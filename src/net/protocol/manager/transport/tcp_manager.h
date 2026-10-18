@@ -3,6 +3,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <spdlog/spdlog.h>
 #include <common/socket_buffer.h>
@@ -19,7 +20,7 @@ public:
     TcpManager(app::ApplicationService* app, inet::InternetService* inet, trans::TransportService* trans,
                std::shared_ptr<spdlog::logger> logger);
     ~TcpManager() override;
-    void on_session_state_changed(TcpSession& session, const TcpStateTransition& transition) override;
+    void on_session_closed(std::shared_ptr<TcpSession> session, bool sync = false) override;
 
     co_async<> on_tcp_segment_received(const SocketBuffer& inbound, const TcpContext& ctx);
     co_async<> async_send_tcp_segment(const SocketBuffer outbound, const TcpContext ctx) const;
@@ -31,10 +32,11 @@ public:
 private:
     std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data, size_t max_tcp_payload) const;
     void add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session);
-    void release_session(TcpSession& session, TcpState prev_state);
-    static bool is_waiter_ready(const TcpSession& session, const UserSocketContext& ctx);
-    void wakeup_waiter(TcpSession& session, int error = 0) const;
-    void notify_waiter(TcpSession& session, UserSocketContext* ctx, int error) const;
+    void release_session(std::shared_ptr<TcpSession> session);
+    co_async<> async_release_session(std::shared_ptr<TcpSession> session);
+    void dispatch_session_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
+    static bool check_connect_waiter_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
+    static bool check_read_waiter_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
 
     std::shared_ptr<TcpSession> find_session_by_fd(int fd) const;
     std::shared_ptr<TcpConnectSession> find_connection_session(const TcpSocketHandle& handle) const;
