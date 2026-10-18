@@ -51,6 +51,11 @@ constexpr int TCP_ACCEPT_BACKLOG_TIMEOUT = 30;
 // never calls accept() can not grow memory without bound.
 constexpr int TCP_MAX_ACCEPT_BACKLOG = 128;
 
+// Time in seconds an ARP mapping stays usable without being confirmed by a new ARP packet. A stale mapping is
+// not handed out any more (the caller re-resolves it) and an unused entry is reclaimed by the lazy cleanup, so a
+// peer that changed its MAC or disappeared can not keep a wrong entry forever.
+constexpr int ARP_ENTRY_TIMEOUT = 300;
+
 #ifdef NDEBUG
 constexpr int TCP_MAX_SEGMENT_LIFETIME = 30;
 #else

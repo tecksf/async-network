@@ -13,11 +13,38 @@ LinkManager::~LinkManager()
 {
 }
 
+void LinkManager::collect_expired_entries(std::chrono::steady_clock::time_point now)
+{
+    if (last_cleanup != std::chrono::steady_clock::time_point{} and now - last_cleanup < CleanupInterval)
+    {
+        return;
+    }
+    last_cleanup = now;
+
+    for (auto iter = arp_table.begin(); iter != arp_table.end();)
+    {
+        const ArpEntry& entry = iter->second;
+        if (not entry.waiters.empty() or now - entry.update_time_point < EntryTimeout)
+        {
+            ++iter;
+            continue;
+        }
+
+        logger->debug("===> ARP entry {} expired after {}s, dropped", iter->first.to_string(), EntryTimeout.count());
+        iter = arp_table.erase(iter);
+    }
+}
+
 std::vector<std::coroutine_handle<>> LinkManager::update_address_mapping(const IpAddress& ip, const MacAddress& mac)
 {
+    const auto now = std::chrono::steady_clock::now();
+
     std::lock_guard<std::mutex> lock(arp_table_mutex);
+    collect_expired_entries(now);
+
     ArpEntry& entry = arp_table[ip];
     entry.mac = mac;
+    entry.update_time_point = now;
 
     std::vector<std::coroutine_handle<>> waiters;
     if (not entry.waiters.empty())
@@ -31,13 +58,24 @@ std::vector<std::coroutine_handle<>> LinkManager::update_address_mapping(const I
 
 std::optional<MacAddress> LinkManager::retrieve_mac_address(const IpAddress& ip, std::coroutine_handle<> waiter)
 {
+    const auto now = std::chrono::steady_clock::now();
+
     std::lock_guard<std::mutex> lock(arp_table_mutex);
+    collect_expired_entries(now);
+
     ArpEntry& entry = arp_table[ip];
     if (entry.mac.has_value())
     {
-        return entry.mac;
+        if (now - entry.update_time_point < EntryTimeout)
+        {
+            return entry.mac;
+        }
+
+        logger->debug("===> ARP entry {} expired after {}s, re-resolving", ip.to_string(), EntryTimeout.count());
+        entry.mac.reset();
     }
 
+    entry.update_time_point = now;
     entry.waiters.push_back(waiter);
     return std::nullopt;
 }
