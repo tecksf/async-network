@@ -4,8 +4,8 @@
 namespace coro::net::trans {
 
 UdpManager::UdpManager(app::ApplicationService* app, inet::InternetService* inet, trans::TransportService* trans,
-                       std::shared_ptr<spdlog::logger> logger)
-    : app(app), inet(inet), trans(trans), logger(logger)
+                       std::shared_ptr<spdlog::logger> logger, const UdpConfig& config)
+    : app(app), trans(trans), inet(inet), logger(logger), config(config)
 {
 }
 
@@ -198,8 +198,8 @@ void UdpManager::handle_udp_data_from_network(const UdpSocketHandle& handle, con
 
 std::vector<SocketBuffer> UdpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data) const
 {
-    constexpr int first_capacity = align_down_8(IP_V4_MTU - UdpSegment::HeaderSize);
-    constexpr int max_capacity = align_down_8(IP_V4_MTU);
+    const int first_capacity = align_down_8(config.mtu - static_cast<int>(UdpSegment::HeaderSize));
+    const int max_capacity = align_down_8(config.mtu);
 
     std::vector<SocketBuffer> outbounds;
     std::span<uint8_t> rest = user_data;
@@ -219,7 +219,7 @@ std::vector<SocketBuffer> UdpManager::copy_user_data_to_buffer(std::span<uint8_t
         outbounds.push_back(outbound);
     };
 
-    if (rest.size() <= IP_V4_MTU - UdpSegment::HeaderSize)
+    if (rest.size() <= static_cast<size_t>(config.mtu - static_cast<int>(UdpSegment::HeaderSize)))
     {
         append_fragment(rest.size());
         return outbounds;

@@ -7,10 +7,15 @@
 namespace coro::net::trans {
 
 TcpSendWindow::TcpSendWindow(app::ApplicationService* app, trans::TransportService* trans, TcpSendEvents* events,
-                             const IpAddress& remote, std::shared_ptr<spdlog::logger> logger)
+                             const IpAddress& remote, std::shared_ptr<spdlog::logger> logger, const TcpConfig& config)
     : app(app), trans(trans), logger(logger),
       destination_ip(remote),
-      events(events)
+      events(events),
+      max_retransmissions(config.max_retransmissions),
+      initial_retransmission_timeout(config.initial_rto_ms),
+      max_retransmission_timeout(config.max_rto_ms),
+      window_size(static_cast<uint32_t>(config.window_size)),
+      peer_window(static_cast<uint32_t>(config.window_size))
 {
 }
 
@@ -61,7 +66,7 @@ void TcpSendWindow::update_peer_window(uint16_t window, uint32_t segment_sequenc
         return;
     }
 
-    const uint32_t updated = std::min<uint32_t>(window, TCP_WINDOW_SIZE);
+    const uint32_t updated = std::min<uint32_t>(window, window_size);
 
     // Only a segment fresher than the last update may change the window, otherwise the state
     // could go backwards:
@@ -233,17 +238,17 @@ co_async<> TcpSendWindow::retransmit_segment(std::shared_ptr<TcpInFlightSegment>
             co_return;
         }
 
-        if (segment->retransmissions >= MaxRetransmissions)
+        if (segment->retransmissions >= max_retransmissions)
         {
             logger->error("TCP segment seq {} len {} exceeded {} retransmissions", segment->sequence_number,
-                          segment->sequence_length, MaxRetransmissions);
+                          segment->sequence_length, max_retransmissions);
             events->on_retransmission_failed();
             co_return;
         }
 
         ++segment->retransmissions;
         logger->warn("TCP segment seq {} timed out after {}ms, retransmission {}/{}",
-                     segment->sequence_number, timeout.count(), segment->retransmissions, MaxRetransmissions);
+                     segment->sequence_number, timeout.count(), segment->retransmissions, max_retransmissions);
     }
 }
 

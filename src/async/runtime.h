@@ -7,6 +7,8 @@
 #include <future>
 #include <spdlog/spdlog.h>
 #include <memory>
+#include <string>
+#include <vector>
 #include <socket/socket.h>
 
 namespace coro {
@@ -19,7 +21,8 @@ public:
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     static Runtime*& current();
-    void start_network(const std::string& interface_name, const std::string& ip);
+    bool start_network(const std::vector<std::string>& options);
+    std::string network_address() const;
     std::shared_ptr<net::SocketRegistry> current_network() const;
 
     template<typename T>

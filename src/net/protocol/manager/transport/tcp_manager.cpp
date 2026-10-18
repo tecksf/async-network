@@ -8,8 +8,8 @@ namespace coro::net::trans {
 
 
 TcpManager::TcpManager(app::ApplicationService* app, inet::InternetService* inet, trans::TransportService* trans,
-                       std::shared_ptr<spdlog::logger> logger)
-    : app(app), inet(inet), trans(trans), logger(logger)
+                       std::shared_ptr<spdlog::logger> logger, const TcpConfig& config)
+    : app(app), trans(trans), inet(inet), logger(logger), config(config)
 {
 }
 
@@ -353,7 +353,7 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
 std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data, size_t max_tcp_payload) const
 {
     std::vector<SocketBuffer> outbounds;
-    constexpr size_t max_mtu_payload = IP_V4_MTU - TcpSegment::HeaderSize;
+    const size_t max_mtu_payload = static_cast<size_t>(config.mtu) - TcpSegment::HeaderSize;
     const size_t max_capacity = std::clamp<size_t>(max_tcp_payload, 1, max_mtu_payload);
 
     std::span<uint8_t> rest = user_data;
@@ -424,6 +424,11 @@ app::ApplicationService* TcpManager::get_app() const
 trans::TransportService* TcpManager::get_trans() const
 {
     return trans;
+}
+
+const TcpConfig& TcpManager::get_config() const
+{
+    return config;
 }
 
 }

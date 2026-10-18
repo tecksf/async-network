@@ -34,6 +34,13 @@ target_link_libraries(net PUBLIC spdlog::spdlog)
 
 add_executable(async_network main.cpp)
 target_link_libraries(async_network PRIVATE coro net)
+
+add_custom_command(TARGET async_network POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/config"
+    "$<TARGET_FILE_DIR:async_network>/config"
+)
+
 set_target_properties(async_network PROPERTIES
     BUILD_RPATH "${LIBURING_LIBDIR}"
     BUILD_RPATH_USE_ORIGIN ON

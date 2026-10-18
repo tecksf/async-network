@@ -3,8 +3,10 @@
 namespace coro::net::trans {
 
 
-TcpReceiveWindow::TcpReceiveWindow(std::shared_ptr<spdlog::logger> logger)
-    : logger(logger)
+TcpReceiveWindow::TcpReceiveWindow(std::shared_ptr<spdlog::logger> logger, uint32_t max_window_size)
+    : logger(logger),
+      max_window(max_window_size),
+      advertised_window_size(max_window_size)
 {
 }
 
@@ -25,7 +27,7 @@ uint32_t TcpReceiveWindow::get_next_expected_sequence() const
 
 uint16_t TcpReceiveWindow::available_window() const
 {
-    return static_cast<uint16_t>(MaxReceiveWindowSize - used_bytes);
+    return static_cast<uint16_t>(max_window - used_bytes);
 }
 
 bool TcpReceiveWindow::need_window_update(uint32_t threshold) const
@@ -160,7 +162,7 @@ bool TcpReceiveWindow::reassemble(uint32_t seq_number, const SocketBuffer& paylo
         seq_number = next_expected_sequence;
     }
 
-    if (used_bytes + payload->size() > MaxReceiveWindowSize)
+    if (used_bytes + payload->size() > max_window)
     {
         return false;
     }

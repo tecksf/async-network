@@ -8,6 +8,7 @@
 #include "network_interface.h"
 #include <socket/socket.h>
 #include <common/types.h>
+#include <common/config.h>
 #include <common/ring_buffe.hpp>
 #include <protocol/capability/physical.h>
 #include <protocol/capability/link.h>
@@ -24,6 +25,10 @@ class NetworkController :
 public:
     NetworkController(std::shared_ptr<spdlog::logger> logger);
     ~NetworkController() override;
+
+    bool load_config(const std::vector<std::string>& options);
+    const NetConfig& get_config() const;
+
     void deliver_message(uint8_t*, size_t) override;
     void set_interface_name(const std::string& name);
     std::string get_interface_name() const override;
@@ -57,6 +62,10 @@ private:
     using Block = uint8_t [MAX_BLOCK_SIZE];
     RingBuffer<Block, 128> inbound_buffer;
     RingBuffer<Block, 128> outbound_buffer;
+
+    void create_managers();
+
+    NetConfig config;
 
     std::atomic<int> interface_index{-1};
     std::string interface_name = "eth0";

@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include <protocol/capability/application.h>
 #include <protocol/capability/transport.h>
+#include <common/config.h>
 #include <atomic>
 #include <algorithm>
 #include <chrono>
@@ -60,7 +61,7 @@ public:
 class TcpSendWindow {
 public:
     explicit TcpSendWindow(app::ApplicationService* app, trans::TransportService* trans, TcpSendEvents* events,
-                           const IpAddress& remote, std::shared_ptr<spdlog::logger> logger);
+                           const IpAddress& remote, std::shared_ptr<spdlog::logger> logger, const TcpConfig& config);
     ~TcpSendWindow();
     TcpSendWindow(const TcpSendWindow&) = delete;
     TcpSendWindow& operator=(const TcpSendWindow&) = delete;
@@ -88,16 +89,12 @@ private:
         return peer_window > flight ? peer_window - flight : 0;
     }
 
-    static constexpr int MaxRetransmissions = 15;
-    static constexpr std::chrono::milliseconds InitialRetransmissionTimeout{1000};
-    static constexpr std::chrono::milliseconds MaxRetransmissionTimeout{120000};
-
-    static std::chrono::milliseconds retransmission_timeout(int retransmissions)
+    std::chrono::milliseconds retransmission_timeout(int retransmissions) const
     {
-        auto timeout = InitialRetransmissionTimeout;
-        for (int i = 0; i < retransmissions and timeout < MaxRetransmissionTimeout; ++i)
+        auto timeout = initial_retransmission_timeout;
+        for (int i = 0; i < retransmissions and timeout < max_retransmission_timeout; ++i)
         {
-            timeout = std::min(timeout * 2, MaxRetransmissionTimeout);
+            timeout = std::min(timeout * 2, max_retransmission_timeout);
         }
         return timeout;
     }
@@ -108,9 +105,14 @@ private:
     const IpAddress destination_ip;
     TcpSendEvents* events;
 
+    const int max_retransmissions;
+    const std::chrono::milliseconds initial_retransmission_timeout;
+    const std::chrono::milliseconds max_retransmission_timeout;
+    const uint32_t window_size;
+
     uint32_t unacknowledged = 0;
     uint32_t next_sequence = 0;
-    uint32_t peer_window = TCP_WINDOW_SIZE;
+    uint32_t peer_window;
     uint32_t last_window_update_sequence = 0;
     std::optional<uint32_t> last_probe_sequence;
     bool window_update_valid = false;

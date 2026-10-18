@@ -7,6 +7,7 @@
 #include <protocol/capability/link.h>
 #include <protocol/capability/internet.h>
 #include <common/types.h>
+#include <common/config.h>
 #include <spdlog/spdlog.h>
 
 namespace coro::net::link {
@@ -22,7 +23,8 @@ public:
     LinkManager(inet::InternetService* inet,
                LinkService* link,
                phy::PhysicalService* phy,
-               std::shared_ptr<spdlog::logger> logger);
+               std::shared_ptr<spdlog::logger> logger,
+               const LinkConfig& config);
     ~LinkManager();
 
     std::vector<std::coroutine_handle<>> update_address_mapping(const IpAddress& ip, const MacAddress& mac);
@@ -34,15 +36,16 @@ public:
     co_async<> async_send_arp_request_operation(IpAddress ip) const;
 
 private:
-    static constexpr std::chrono::seconds CleanupInterval{1};
-    static constexpr std::chrono::seconds EntryTimeout{ARP_ENTRY_TIMEOUT};
-
     void collect_expired_entries(std::chrono::steady_clock::time_point now);
 
     inet::InternetService* inet;
     LinkService* link;
     phy::PhysicalService* phy;
     std::shared_ptr<spdlog::logger> logger;
+
+    const LinkConfig config;
+    const std::chrono::seconds cleanup_interval;
+    const std::chrono::seconds entry_timeout;
 
     std::mutex arp_table_mutex;
     std::map<IpAddress, ArpEntry> arp_table;

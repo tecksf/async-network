@@ -9,7 +9,6 @@ namespace coro::net::link {
 class EthernetFrame : public LayerStreamBuilder<EthernetFrame> {
 public:
     static constexpr size_t HeaderSize = ETHERNET_HEADER_SIZE;
-    static constexpr size_t MTU = ETHERNET_MTU;
 
     explicit EthernetFrame(std::span<uint8_t> data, bool create = false)
         : destination(data.first(6))

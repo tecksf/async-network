@@ -4,8 +4,12 @@
 
 namespace coro::net::link {
 
-LinkManager::LinkManager(inet::InternetService* inet, LinkService* link, phy::PhysicalService* phy, std::shared_ptr<spdlog::logger> logger)
-    : inet(inet), link(link), phy(phy), logger(logger)
+LinkManager::LinkManager(inet::InternetService* inet, LinkService* link, phy::PhysicalService* phy,
+                         std::shared_ptr<spdlog::logger> logger, const LinkConfig& config)
+    : inet(inet), link(link), phy(phy), logger(logger),
+      config(config),
+      cleanup_interval(config.arp_cleanup_interval),
+      entry_timeout(config.arp_entry_timeout)
 {
 }
 
@@ -15,7 +19,7 @@ LinkManager::~LinkManager()
 
 void LinkManager::collect_expired_entries(std::chrono::steady_clock::time_point now)
 {
-    if (last_cleanup != std::chrono::steady_clock::time_point{} and now - last_cleanup < CleanupInterval)
+    if (last_cleanup != std::chrono::steady_clock::time_point{} and now - last_cleanup < cleanup_interval)
     {
         return;
     }
@@ -24,13 +28,13 @@ void LinkManager::collect_expired_entries(std::chrono::steady_clock::time_point 
     for (auto iter = arp_table.begin(); iter != arp_table.end();)
     {
         const ArpEntry& entry = iter->second;
-        if (not entry.waiters.empty() or now - entry.update_time_point < EntryTimeout)
+        if (not entry.waiters.empty() or now - entry.update_time_point < entry_timeout)
         {
             ++iter;
             continue;
         }
 
-        logger->debug("===> ARP entry {} expired after {}s, dropped", iter->first.to_string(), EntryTimeout.count());
+        logger->debug("===> ARP entry {} expired after {}s, dropped", iter->first.to_string(), entry_timeout.count());
         iter = arp_table.erase(iter);
     }
 }
@@ -66,12 +70,12 @@ std::optional<MacAddress> LinkManager::retrieve_mac_address(const IpAddress& ip,
     ArpEntry& entry = arp_table[ip];
     if (entry.mac.has_value())
     {
-        if (now - entry.update_time_point < EntryTimeout)
+        if (now - entry.update_time_point < entry_timeout)
         {
             return entry.mac;
         }
 
-        logger->debug("===> ARP entry {} expired after {}s, re-resolving", ip.to_string(), EntryTimeout.count());
+        logger->debug("===> ARP entry {} expired after {}s, re-resolving", ip.to_string(), entry_timeout.count());
         entry.mac.reset();
     }
 
@@ -116,9 +120,9 @@ co_async<> LinkManager::on_ethernet_frame_received(const SocketBuffer& inbound) 
 
 co_async<> LinkManager::async_send_ethernet_frame(const SocketBuffer& outbound, const EthernetContext& ctx) const
 {
-    if (outbound->size() > EthernetFrame::MTU)
+    if (outbound->size() > static_cast<size_t>(config.ethernet_mtu))
     {
-        logger->error("Ethernet payload is more than MTU({} bytes), size={}, will drop", EthernetFrame::MTU, outbound->size());
+        logger->error("Ethernet payload is more than MTU({} bytes), size={}, will drop", config.ethernet_mtu, outbound->size());
         co_return;
     }
 

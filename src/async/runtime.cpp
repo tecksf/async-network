@@ -60,18 +60,21 @@ Runtime*& Runtime::current()
     return CurrentRuntime;
 }
 
-void Runtime::start_network(const std::string& interface_name, const std::string& ip)
+bool Runtime::start_network(const std::vector<std::string>& options)
 {
-    impl->controller->set_interface_name(interface_name);
-    if (auto address = net::IpAddress::from(ip))
+    if (not impl->controller->load_config(options))
     {
-        impl->controller->set_host_ip(address.value());
-        start();
+        impl->logger->error("[Runtime] invalid network configuration, network not started");
+        return false;
     }
-    else
-    {
-        impl->logger->warn("[Runtime] invalid ip address {}", ip);
-    }
+
+    start();
+    return true;
+}
+
+std::string Runtime::network_address() const
+{
+    return impl->controller->get_config().host_ip;
 }
 
 std::shared_ptr<net::SocketRegistry> Runtime::current_network() const

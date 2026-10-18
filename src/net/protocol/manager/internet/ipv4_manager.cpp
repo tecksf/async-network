@@ -29,9 +29,10 @@ static bool has_overlapping(std::map<uint32_t, uint32_t>& received_ranges, uint3
 }
 
 Ipv4Manager::Ipv4Manager(trans::TransportService* trans, inet::InternetService* inet, link::LinkService* link,
-                         std::shared_ptr<spdlog::logger> logger)
+                         std::shared_ptr<spdlog::logger> logger, const Ipv4Config& config)
     : icmp_manager(inet, logger),
-      trans(trans), inet(inet), link(link), logger(logger)
+      trans(trans), inet(inet), link(link), logger(logger),
+      config(config)
 {
 }
 
@@ -119,6 +120,7 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const SocketBuffer& outbound, con
     packet.set_total_length(outbound->size());
     packet.set_identification(fetch_identification());
     packet.set_protocol(ctx.protocol);
+    packet.set_time_to_live(static_cast<uint8_t>(config.time_to_live));
     packet.set_source_ip(inet->get_host_ip());
     packet.set_destination_ip(ctx.destination);
     packet.seal();
@@ -157,6 +159,7 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& 
         packet.set_identification(id);
         packet.set_fragment_offset(offset / Ipv4Packet::FragmentAlignment);
         packet.set_protocol(ctx.protocol);
+        packet.set_time_to_live(static_cast<uint8_t>(config.time_to_live));
         packet.set_source_ip(inet->get_host_ip());
         packet.set_destination_ip(ctx.destination);
 
@@ -179,7 +182,7 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& 
 
 co_async<std::optional<MacAddress>> Ipv4Manager::async_retrieve_mac_address(const IpAddress& ip) const
 {
-    int retry = 5;
+    int retry = config.arp_retry;
     std::optional<MacAddress> mac = std::nullopt;
 
     while (retry-- > 0)

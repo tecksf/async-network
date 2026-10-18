@@ -1,6 +1,9 @@
 #include <chrono>
+#include <string>
+#include <vector>
 #include <utils/log.h>
 #include <async/coro.h>
+#include <async/runtime.h>
 #include <async/socket.h>
 #include <spdlog/async.h>
 
@@ -8,7 +11,7 @@ using namespace coro::net;
 
 static co_async<> start_udp_echo(std::shared_ptr<spdlog::logger> logger, std::string network_address, coro::WaitGroup& group)
 {
-    logger->info("Test UDP function called");
+    logger->info("========> start_udp_echo <========");
 
     std::string address = network_address + ":7890";
     auto binder = co_await UdpSocket::bind(address);
@@ -52,9 +55,45 @@ static co_async<> start_udp_echo(std::shared_ptr<spdlog::logger> logger, std::st
     co_return;
 }
 
+
+static co_async<> start_tcp_client(TcpSocket socket, std::shared_ptr<spdlog::logger> logger, coro::WaitGroup& group)
+{
+    logger->info("Accepted a new connection from {}", socket.get_remote_address().to_string());
+    co_await socket.write("hello, I'm tcp echo!");
+
+    std::vector<uint8_t> buffer;
+    buffer.resize(4096);
+    std::span data(buffer);
+
+    while (true)
+    {
+        auto res = co_await socket.read(data);
+        if (not res.has_value())
+        {
+            logger->error("Read failed: {}", res.error().message());
+            co_await socket.close();
+            break;
+        }
+
+        int count = res.value();
+        if (count == 0)
+        {
+            logger->info("Connection closed by remote");
+            co_await socket.close();
+            break;
+        }
+
+        std::string text(data.begin(), data.begin() + count);
+        spdlog::info("Received {} bytes ==> {}", count, text);
+    }
+
+    group.done();
+    co_return;
+}
+
 static co_async<> start_tcp_echo(std::shared_ptr<spdlog::logger> logger, std::string network_address, coro::WaitGroup& group)
 {
-    logger->info("Test TCP function called");
+    logger->info("========> start_tcp_echo <========");
 
     std::string address = network_address + ":7891";
     auto binder = co_await TcpListener::bind(address);
@@ -77,14 +116,34 @@ static co_async<> start_tcp_echo(std::shared_ptr<spdlog::logger> logger, std::st
             break;
         }
 
-        auto socket = result.value();
-        logger->info("Accepted a new connection from {}:{}", socket.get_ip_address().to_string(), socket.get_port());
-
-        co_await socket.write("hello, I'm tcp echo!");
+        group.add(1);
+        coro::spawn(start_tcp_client(std::move(result.value()), logger, group));
     }
 
     group.done();
     co_return;
+}
+
+
+static co_async<> start_tcp_connect(std::shared_ptr<spdlog::logger> logger, coro::WaitGroup& group)
+{
+    logger->info("========> start_tcp_connect <========");
+    auto result = co_await TcpSocket::connect("192.168.1.1:7899");
+    if (not result.has_value())
+    {
+        logger->error("Accept failed: {}", result.error().message());
+        group.done();
+        co_return;
+    }
+
+    auto socket = std::move(result.value());
+    logger->info("create a new connection {0}-{1}",
+                 socket.get_local_address().to_string(), socket.get_remote_address().to_string());
+
+    co_await socket.write("hello, I'm tcp client!");
+    co_await socket.close();
+
+    group.done();
 }
 
 static co_async<> co_main(std::shared_ptr<spdlog::logger> logger, std::string network_address)
@@ -92,9 +151,10 @@ static co_async<> co_main(std::shared_ptr<spdlog::logger> logger, std::string ne
     logger->info("co_main start");
 
     coro::WaitGroup group;
-    group.add(2);
+    group.add(3);
     coro::spawn(start_udp_echo(logger, network_address, group));
     coro::spawn(start_tcp_echo(logger, network_address, group));
+    coro::spawn(start_tcp_connect(logger, group));
 
     co_await group.wait();
     co_return;
@@ -102,14 +162,12 @@ static co_async<> co_main(std::shared_ptr<spdlog::logger> logger, std::string ne
 
 int main(int argc, char* argv[])
 {
-    if (argc < 3)
+    std::vector<std::string> options;
+    options.reserve(static_cast<size_t>(argc > 1 ? argc - 1 : 0));
+    for (int i = 1; i < argc; ++i)
     {
-        spdlog::error("Usage: {} <nic_interface> <network_address>", argv[0]);
-        return 1;
+        options.emplace_back(argv[i]);
     }
-
-    const std::string nic_interface = argv[1];
-    const std::string network_address = argv[2];
 
     spdlog::init_thread_pool(8192, 1, [] {
         return std::make_shared<spdlog::details::thread_pool>(8192, 1);
@@ -118,8 +176,13 @@ int main(int argc, char* argv[])
     auto logger = utils::create_async_logger("runtime");
 
     coro::Runtime runtime(4, logger);
-    runtime.start_network(nic_interface, network_address);
-    runtime.block_on(co_main(logger, network_address));
+    if (not runtime.start_network(options))
+    {
+        logger->error("Usage: {} [config=<path>] [interface=<name>] [ip=<address>] [key=value,...]", argv[0]);
+        return 1;
+    }
+
+    runtime.block_on(co_main(logger, runtime.network_address()));
 
     return 0;
 }

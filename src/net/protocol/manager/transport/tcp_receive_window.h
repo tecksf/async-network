@@ -16,7 +16,7 @@ namespace coro::net::trans {
 
 class TcpReceiveWindow {
 public:
-    explicit TcpReceiveWindow(std::shared_ptr<spdlog::logger> logger);
+    explicit TcpReceiveWindow(std::shared_ptr<spdlog::logger> logger, uint32_t max_window_size);
     ~TcpReceiveWindow();
 
     void set_next_expected_sequence(uint32_t seq);
@@ -36,7 +36,10 @@ public:
     bool need_window_update(uint32_t threshold) const;
     void mark_window_advertised();
 
-    static constexpr uint32_t MaxReceiveWindowSize = TCP_WINDOW_SIZE;
+    uint32_t max_window_size() const
+    {
+        return max_window;
+    }
 
 private:
     struct Segment {
@@ -61,11 +64,13 @@ private:
 
     std::shared_ptr<spdlog::logger> logger;
 
+    const uint32_t max_window;
+
     bool initialized = false;
     uint32_t next_expected_sequence = 0;
     uint32_t read_sequence = 0;
     uint32_t used_bytes = 0;
-    uint32_t advertised_window_size = MaxReceiveWindowSize;
+    uint32_t advertised_window_size;
     std::optional<uint32_t> finish_sequence;
     std::set<Segment, Segment::Less> buffer;
 };

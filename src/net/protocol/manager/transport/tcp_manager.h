@@ -10,6 +10,7 @@
 #include <protocol/capability/application.h>
 #include <protocol/capability/internet.h>
 #include <protocol/capability/transport.h>
+#include <common/config.h>
 #include <socket/socket.h>
 #include "tcp_session.h"
 
@@ -18,7 +19,7 @@ namespace coro::net::trans {
 class TcpManager : public TcpSessionEvent {
 public:
     TcpManager(app::ApplicationService* app, inet::InternetService* inet, trans::TransportService* trans,
-               std::shared_ptr<spdlog::logger> logger);
+               std::shared_ptr<spdlog::logger> logger, const TcpConfig& config);
     ~TcpManager() override;
     void on_session_closed(std::shared_ptr<TcpSession> session, bool sync = false) override;
 
@@ -27,6 +28,7 @@ public:
     std::shared_ptr<spdlog::logger> get_logger() const;
     app::ApplicationService* get_app() const;
     trans::TransportService* get_trans() const;
+    const TcpConfig& get_config() const;
     bool handle_user_socket_operation(UserSocketContext* ctx);
 
 private:
@@ -47,6 +49,7 @@ private:
     trans::TransportService* trans;
     inet::InternetService* inet;
     std::shared_ptr<spdlog::logger> logger;
+    const TcpConfig config;
 
     mutable std::shared_mutex socket_mutex;
     std::map<int, std::shared_ptr<TcpSession>> sockets;

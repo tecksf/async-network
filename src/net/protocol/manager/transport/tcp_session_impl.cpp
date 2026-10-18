@@ -9,7 +9,6 @@ namespace {
 
 constexpr int SipCompressionRounds = 2;
 constexpr int SipFinalizationRounds = 4;
-constexpr std::uint32_t SynCookieMssCodeMask = (1u << coro::net::TCP_MSS_COOKIE_BITS) - 1;
 
 constexpr std::uint64_t rotl64(std::uint64_t value, int bits)
 {
@@ -99,7 +98,7 @@ TcpConnectSession::TcpConnectSession(TcpManager* manager, TcpState s, const TcpS
         sequence_number = rand_uint<uint32_t>() & 0xffff;
 
         auto outbound = app->allocate_socket_buffer();
-        constexpr TcpOptionSet options{.mss = TCP_DEFAULT_MSS};
+        const TcpOptionSet options{.mss = static_cast<uint16_t>(tcp_config.mss)};
         send_tcp_segment(outbound, TcpSegment::FLAG_SYN, options);
 
         sequence_number += 1;
@@ -231,24 +230,35 @@ void TcpListenSession::add_listen_waiter(UserSocketContext* ctx)
     accept_waiters.push_back(ctx);
 }
 
-std::uint64_t TcpListenSession::current_cookie_timeslot()
+std::uint64_t TcpListenSession::current_cookie_timeslot() const
 {
     const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    return static_cast<std::uint64_t>(seconds / TCP_SYN_COOKIE_INTERVAL);
+    return static_cast<std::uint64_t>(seconds / tcp_config.syn_cookie_interval);
 }
 
-std::uint8_t TcpListenSession::encode_mss_code(std::uint16_t mss)
+std::uint32_t TcpListenSession::mss_code_mask() const
 {
-    const std::uint32_t clamped = std::clamp<std::uint32_t>(mss, TCP_MIN_MSS, TCP_DEFAULT_MSS);
-    const std::uint32_t code = (clamped - TCP_MIN_MSS + TCP_MSS_COOKIE_STEP / 2) / TCP_MSS_COOKIE_STEP;
-    return static_cast<std::uint8_t>(std::min<std::uint32_t>(code, SynCookieMssCodeMask));
+    return (1u << tcp_config.mss_cookie_bits) - 1;
 }
 
-std::uint16_t TcpListenSession::decode_mss_code(std::uint8_t code)
+std::uint8_t TcpListenSession::encode_mss_code(std::uint16_t mss) const
 {
-    const std::uint32_t mss = TCP_MIN_MSS + static_cast<std::uint32_t>(code) * TCP_MSS_COOKIE_STEP;
-    return static_cast<std::uint16_t>(std::clamp<std::uint32_t>(mss, TCP_MIN_MSS, TCP_DEFAULT_MSS));
+    const auto min_mss = static_cast<std::uint32_t>(tcp_config.min_mss);
+    const auto max_mss = static_cast<std::uint32_t>(tcp_config.mss);
+    const auto step = static_cast<std::uint32_t>(tcp_config.mss_cookie_step);
+
+    const std::uint32_t clamped = std::clamp<std::uint32_t>(mss, min_mss, max_mss);
+    const std::uint32_t code = (clamped - min_mss + step / 2) / step;
+    return static_cast<std::uint8_t>(std::min<std::uint32_t>(code, mss_code_mask()));
+}
+
+std::uint16_t TcpListenSession::decode_mss_code(std::uint8_t code) const
+{
+    const auto min_mss = static_cast<std::uint32_t>(tcp_config.min_mss);
+    const auto max_mss = static_cast<std::uint32_t>(tcp_config.mss);
+    const std::uint32_t mss = min_mss + static_cast<std::uint32_t>(code) * tcp_config.mss_cookie_step;
+    return static_cast<std::uint16_t>(std::clamp<std::uint32_t>(mss, min_mss, max_mss));
 }
 
 uint32_t TcpListenSession::make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot, std::uint8_t mss_code) const
@@ -262,14 +272,15 @@ uint32_t TcpListenSession::make_syn_cookie(const SocketAddress& client, std::uin
     put_bytes(input, offset, static_cast<std::uint32_t>(timeslot & 0xffffffffULL), 4);
     put_bytes(input, offset, static_cast<std::uint32_t>(timeslot >> 32), 4);
 
+    const std::uint32_t mask = mss_code_mask();
     const std::uint64_t hash = siphash24(syn_cookie_key0, syn_cookie_key1, input);
     const std::uint32_t digest = static_cast<std::uint32_t>(hash ^ (hash >> 32));
-    return (digest & ~SynCookieMssCodeMask) | (mss_code & SynCookieMssCodeMask);
+    return (digest & ~mask) | (mss_code & mask);
 }
 
 bool TcpListenSession::verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie, std::uint16_t& peer_mss) const
 {
-    const auto mss_code = static_cast<std::uint8_t>(cookie & SynCookieMssCodeMask);
+    const auto mss_code = static_cast<std::uint8_t>(cookie & mss_code_mask());
     const std::uint64_t timeslot = current_cookie_timeslot();
     if (make_syn_cookie(client, timeslot, mss_code) == cookie or
         (timeslot > 0 and make_syn_cookie(client, timeslot - 1, mss_code) == cookie))
@@ -293,8 +304,8 @@ void TcpListenSession::send_syn_ack_without_retransmission(const SocketBuffer& o
     segment.set_sequence_number(cookie);
     segment.set_ack_number(client_isn + 1);
     segment.set_flag(TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK);
-    segment.set_window_size(TCP_WINDOW_SIZE);
-    TcpOption(segment.get_options(), true).add_mss(TCP_DEFAULT_MSS);
+    segment.set_window_size(static_cast<uint16_t>(tcp_config.window_size));
+    TcpOption(segment.get_options(), true).add_mss(static_cast<uint16_t>(tcp_config.mss));
 
     FakeHeader fake_header;
     fake_header.set_source_ip(local.ip);
@@ -316,7 +327,7 @@ void TcpListenSession::collect_expired_accepts(std::vector<std::shared_ptr<TcpCo
 
     for (auto iter = accept_queue.begin(); iter != accept_queue.end();)
     {
-        if (now - iter->second.created_time_point < AcceptTimeout)
+        if (now - iter->second.created_time_point < std::chrono::seconds(tcp_config.accept_timeout))
         {
             ++iter;
             continue;
@@ -337,7 +348,7 @@ void TcpListenSession::report_dropped(const SocketAddress& client, std::string_v
 
     // log throttling: at most one line per interval, so a flood can not amplify itself into the log
     const auto now = std::chrono::steady_clock::now();
-    if (last_drop_log != std::chrono::steady_clock::time_point{} and now - last_drop_log < DropLogInterval)
+    if (last_drop_log != std::chrono::steady_clock::time_point{} and now - last_drop_log < std::chrono::seconds(tcp_config.drop_log_interval))
     {
         return;
     }
@@ -358,7 +369,8 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
     {
         std::lock_guard lock(accept_mutex);
         const auto now = std::chrono::steady_clock::now();
-        if (last_cleanup == std::chrono::steady_clock::time_point{} or now - last_cleanup >= CleanupInterval)
+        if (last_cleanup == std::chrono::steady_clock::time_point{} or
+            now - last_cleanup >= std::chrono::seconds(tcp_config.cleanup_interval))
         {
             collect_expired_accepts(expired);
         }
@@ -375,7 +387,7 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
         // SYN-ACK sequence number (cookie). Under a flood every SYN costs one hash plus one send, with no
         // queue entry and no retransmission coroutine.
         const std::uint32_t client_isn = header.get_sequence_number();
-        const std::uint16_t peer_mss = header.get_all_options().mss.value_or(TCP_MIN_MSS);
+        const std::uint16_t peer_mss = header.get_all_options().mss.value_or(static_cast<uint16_t>(tcp_config.min_mss));
         auto outbound = SocketBuffer::reuse_for_outbound(payload);
         uint32_t cookie_seq = make_syn_cookie(client, current_cookie_timeslot(), encode_mss_code(peer_mss));
         send_syn_ack_without_retransmission(outbound, client, cookie_seq, client_isn);
@@ -417,7 +429,7 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
     }
 
     const std::uint32_t ack_number = header.get_ack_number();
-    std::uint16_t peer_mss = TCP_MIN_MSS;
+    std::uint16_t peer_mss = static_cast<uint16_t>(tcp_config.min_mss);
     if (ack_number == 0 or not verify_syn_cookie(client, ack_number - 1, peer_mss))
     {
         std::lock_guard lock(accept_mutex);
@@ -446,13 +458,13 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
         }
         else
         {
-            if (accept_queue.size() >= TCP_MAX_ACCEPT_BACKLOG)
+            if (accept_queue.size() >= static_cast<size_t>(tcp_config.max_accept_backlog))
             {
                 // queue is full: reclaim expired entries first, then decide whether the new connection has to be dropped
                 collect_expired_accepts(evicted);
             }
 
-            if (accept_queue.size() >= TCP_MAX_ACCEPT_BACKLOG)
+            if (accept_queue.size() >= static_cast<size_t>(tcp_config.max_accept_backlog))
             {
                 admitted = false;
                 report_dropped(client, "accept backlog is full");

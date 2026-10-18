@@ -9,6 +9,7 @@
 #include <protocol/capability/application.h>
 #include <protocol/capability/internet.h>
 #include <protocol/capability/transport.h>
+#include <common/config.h>
 #include <socket/socket.h>
 
 namespace coro::net::trans {
@@ -30,7 +31,7 @@ struct SocketQueueEntry {
 class UdpManager {
 public:
     UdpManager(app::ApplicationService* app, inet::InternetService* inet, trans::TransportService* trans,
-               std::shared_ptr<spdlog::logger> logger);
+               std::shared_ptr<spdlog::logger> logger, const UdpConfig& config);
     ~UdpManager();
 
     co_async<> on_udp_segment_received(const SocketBuffer& inbound, const UdpContext& ctx);
@@ -46,6 +47,8 @@ private:
     inet::InternetService* inet;
 
     std::shared_ptr<spdlog::logger> logger;
+
+    const UdpConfig config;
 
     std::mutex socket_mutex;
     std::map<int, std::shared_ptr<SocketQueueEntry>> sockets;

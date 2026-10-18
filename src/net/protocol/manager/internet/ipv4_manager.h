@@ -6,6 +6,7 @@
 #include <protocol/capability/internet.h>
 #include <protocol/capability/transport.h>
 #include <protocol/header/ipv4.hpp>
+#include <common/config.h>
 #include <spdlog/spdlog.h>
 #include "icmpv4_manager.h"
 
@@ -48,7 +49,8 @@ public:
     Ipv4Manager(trans::TransportService* trans,
                 inet::InternetService* inet,
                 link::LinkService* link,
-                std::shared_ptr<spdlog::logger> logger);
+                std::shared_ptr<spdlog::logger> logger,
+                const Ipv4Config& config);
     ~Ipv4Manager();
 
     co_async<> on_ipv4_packet_received(const SocketBuffer& inbound);
@@ -66,6 +68,8 @@ private:
     inet::InternetService* inet;
     link::LinkService* link;
     std::shared_ptr<spdlog::logger> logger;
+
+    const Ipv4Config config;
 
     std::mutex fragment_table_mutex;
     std::map<FragmentKey, FragmentEntry> fragment_table;

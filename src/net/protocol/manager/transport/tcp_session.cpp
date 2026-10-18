@@ -11,12 +11,14 @@ TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& loc
     : app(manager->get_app()), trans(manager->get_trans()), logger(manager->get_logger()),
       manager(manager),
       session_events(manager),
+      tcp_config(manager->get_config()),
       session_id(rand_uint<uint32_t>()),
       socket_fd(app->allocate_fd()),
       local(local),
       remote(remote),
-      send_window(manager->get_app(), manager->get_trans(), this, remote.ip, logger),
-      receive_window(logger)
+      peer_mss(static_cast<uint32_t>(manager->get_config().min_mss)),
+      send_window(manager->get_app(), manager->get_trans(), this, remote.ip, logger, manager->get_config()),
+      receive_window(logger, static_cast<uint32_t>(manager->get_config().window_size))
 {
     state = s;
     logger->debug("===> TCP session [{0}] created, State: {1}", session_id, get_state_name(s));
@@ -110,7 +112,8 @@ uint32_t TcpSession::get_send_mss() const
 void TcpSession::set_peer_mss(uint16_t mss)
 {
     // The peer MSS can not exceed what our own MTU allows, and must not drop below the RFC 1122 minimum.
-    peer_mss.store(std::clamp<uint32_t>(mss, TCP_MIN_MSS, TCP_DEFAULT_MSS), std::memory_order_relaxed);
+    peer_mss.store(std::clamp<uint32_t>(mss, static_cast<uint32_t>(tcp_config.min_mss), static_cast<uint32_t>(tcp_config.mss)),
+                   std::memory_order_relaxed);
 }
 
 void TcpSession::update_peer_mss(const TcpSegment& header)
@@ -246,10 +249,10 @@ TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& heade
     uint32_t seq = header.get_sequence_number();
     receive_window.set_next_expected_sequence(seq + 1);
     sequence_number = rand_uint<uint32_t>() & 0xffff;
-    set_peer_mss(header.get_all_options().mss.value_or(TCP_MIN_MSS));
+    set_peer_mss(header.get_all_options().mss.value_or(static_cast<uint16_t>(tcp_config.min_mss)));
 
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
-    constexpr TcpOptionSet options{.mss = TCP_DEFAULT_MSS};
+    const TcpOptionSet options{.mss = static_cast<uint16_t>(tcp_config.mss)};
     send_tcp_segment(outbound, TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK, options);
 
     sequence_number += 1;
@@ -489,7 +492,7 @@ bool TcpSession::verify_reset_sequence(uint32_t seq_num)
         return true;
     }
 
-    const uint32_t window_size = TcpReceiveWindow::MaxReceiveWindowSize - receive_window.already_used_bytes();
+    const uint32_t window_size = receive_window.max_window_size() - receive_window.already_used_bytes();
     if (seq_num > expected and seq_num < expected + window_size)
     {
         logger->warn("{} received in-window RST (seq: {}, expect: {}), sending challenge ACK", get_string_state(), seq_num, expected);
@@ -608,7 +611,8 @@ co_async<> TcpSession::persist_probe_timer(std::shared_ptr<TcpSession> session,
     constexpr size_t probe_size = ETHERNET_HEADER_SIZE + IP_V4_HEADER_SIZE + TCP_HEADER_SIZE + 1;
     uint8_t probe_buffer[probe_size];
 
-    auto interval = InitialPersistProbeInterval;
+    const auto max_interval = std::chrono::seconds(session->tcp_config.persist_probe_max_interval);
+    auto interval = std::chrono::seconds(session->tcp_config.persist_probe_initial_interval);
     while (true)
     {
         co_await coro::sleep(interval);
@@ -640,7 +644,7 @@ co_async<> TcpSession::persist_probe_timer(std::shared_ptr<TcpSession> session,
             co_return;
         }
 
-        interval = std::min(interval * 2, MaxPersistProbeInterval);
+        interval = std::min(interval * 2, max_interval);
     }
 }
 
@@ -718,10 +722,11 @@ void TcpSession::start_time_wait_timer()
 
 co_async<> TcpSession::time_wait_timer(std::shared_ptr<TcpSession> session, std::shared_ptr<std::atomic_bool> token)
 {
+    const auto timeout = std::chrono::seconds(session->tcp_config.max_segment_lifetime * 2);
     session->logger->debug("===> TCP session [{0}] Enter TimeWait, will wait {1}s (2MSL) before closing",
-                           session->session_id, TimeWaitTimeout.count());
+                           session->session_id, timeout.count());
 
-    co_await coro::sleep(TimeWaitTimeout);
+    co_await coro::sleep(timeout);
     if (token->load(std::memory_order_acquire))
     {
         co_return;

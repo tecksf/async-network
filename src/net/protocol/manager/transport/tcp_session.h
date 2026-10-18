@@ -17,6 +17,7 @@
 #include <spdlog/spdlog.h>
 #include <protocol/capability/application.h>
 #include <protocol/capability/transport.h>
+#include <common/config.h>
 #include <socket/socket.h>
 #include "protocol/header/tcp.hpp"
 #include "tcp_send_window.h"
@@ -156,19 +157,12 @@ protected:
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> abort_session(int err);
 
 protected:
-    static constexpr std::chrono::seconds MaximumSegmentLifetime{TCP_MAX_SEGMENT_LIFETIME};
-    static constexpr std::chrono::seconds TimeWaitTimeout{MaximumSegmentLifetime * 2};
-
-    // First interval and upper bound of zero-window probing: a lost window update is recovered
-    // within 1s, while a peer that keeps not reading backs off to one probe per 60s
-    static constexpr std::chrono::seconds InitialPersistProbeInterval{1};
-    static constexpr std::chrono::seconds MaxPersistProbeInterval{60};
-
     app::ApplicationService* app;
     trans::TransportService* trans;
     std::shared_ptr<spdlog::logger> logger;
     TcpManager* manager;
     TcpSessionEvent* session_events;
+    const TcpConfig tcp_config;
     const uint32_t session_id;
     const int socket_fd;
     const SocketAddress local;
@@ -180,7 +174,7 @@ protected:
 
     // MSS advertised by the peer (already clamped): the handshake thread writes it and the application
     // thread reads it, so an atomic keeps both sides free of the session lock.
-    std::atomic<uint32_t> peer_mss{TCP_MIN_MSS};
+    std::atomic<uint32_t> peer_mss{0};
 
     std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
     std::shared_ptr<std::atomic<bool>> persist_cancelled = nullptr;
@@ -230,11 +224,12 @@ private:
     using AcceptIterator = AcceptQueue::iterator;
 
 
-    static std::uint8_t encode_mss_code(std::uint16_t mss);
-    static std::uint16_t decode_mss_code(std::uint8_t code);
+    std::uint32_t mss_code_mask() const;
+    std::uint8_t encode_mss_code(std::uint16_t mss) const;
+    std::uint16_t decode_mss_code(std::uint8_t code) const;
     uint32_t make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot, std::uint8_t mss_code) const;
     bool verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie, std::uint16_t& peer_mss) const;
-    static std::uint64_t current_cookie_timeslot();
+    std::uint64_t current_cookie_timeslot() const;
     void send_syn_ack_without_retransmission(const SocketBuffer& outbound, const SocketAddress& client, std::uint32_t cookie,
                                              std::uint32_t client_isn) const;
 
@@ -242,10 +237,6 @@ private:
     TCP_LOCK_REQUIRED void collect_expired_accepts(std::vector<std::shared_ptr<TcpConnectSession>>& expired);
     // throttled drop/error logging, so a flood can not flood the log as well
     TCP_LOCK_REQUIRED void report_dropped(const SocketAddress& client, std::string_view reason);
-
-    static constexpr std::chrono::seconds DropLogInterval{1};
-    static constexpr std::chrono::seconds CleanupInterval{1};
-    static constexpr std::chrono::seconds AcceptTimeout{TCP_ACCEPT_BACKLOG_TIMEOUT};
 
     const std::uint64_t syn_cookie_key0;
     const std::uint64_t syn_cookie_key1;
