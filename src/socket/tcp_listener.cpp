@@ -16,7 +16,7 @@ TcpBindAwaiter TcpListener::bind(std::string_view addr)
         auto network = Runtime::current()->current_network();
         return TcpBindAwaiter(network, address.value());
     }
-    return TcpBindAwaiter(-EADDRNOTAVAIL);
+    return TcpBindAwaiter(std::errc::address_not_available);
 }
 
 TcpListener::TcpListener(int fd, const SocketAddress& address)

@@ -260,8 +260,7 @@ bool NetworkController::register_user_socket_operation(Protocol protocol, UserSo
 
 void NetworkController::emit_close_socket_event(Protocol protocol, int fd)
 {
-    UserSocketContext context;
-    context.operation = SocketOperation::Close;
+    UserSocketContext context(SocketOperation::Close);
     context.fd = fd;
     register_user_socket_operation(protocol, &context);
 }
@@ -286,6 +285,15 @@ std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
         // {
         //     return 0;
         // }
+
+        // n contains the 14 byte ethernet header, ethernet_mtu only the payload.
+        if (n > config.link.ethernet_mtu + ETHERNET_HEADER_SIZE)
+        {
+            logger->warn("ethernet frame exceeds mtu: frame={} bytes, payload={} bytes, mtu={} bytes",
+                         n, n - ETHERNET_HEADER_SIZE, config.link.ethernet_mtu);
+            recycle(block);
+            return nullptr;
+        }
 
         SocketBuffer inbound(
             std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), config.block_size, n, recycle)

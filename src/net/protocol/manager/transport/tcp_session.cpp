@@ -474,7 +474,7 @@ std::optional<TcpStateTransition> TcpSession::process_tcp_reset(const TcpSegment
             }
 
             logger->warn("===> TCP session [{0}] active open refused by remote port {1} (RST)", session_id, remote.port);
-            return abort_session(-ECONNREFUSED);
+            return abort_session(std::errc::connection_refused);
         case TcpState::SynReceived:
             break;
         case TcpState::Established:
@@ -487,7 +487,7 @@ std::optional<TcpStateTransition> TcpSession::process_tcp_reset(const TcpSegment
             {
                 break;
             }
-            return abort_session(-ECONNRESET);
+            return abort_session(std::errc::connection_reset);
         default:
             logger->warn("{} received RST in unexpected state, will ignore...", get_string_state());
     }
@@ -517,7 +517,7 @@ bool TcpSession::verify_reset_sequence(uint32_t seq_num)
     return false;
 }
 
-std::optional<TcpStateTransition> TcpSession::abort_session(int err)
+std::optional<TcpStateTransition> TcpSession::abort_session(std::errc ec)
 {
     logger->warn("===> TCP session [{0}] aborted by peer (RST), State: {1} --> Closed", session_id, get_string_state());
     stop_persist_probe();
@@ -526,7 +526,7 @@ std::optional<TcpStateTransition> TcpSession::abort_session(int err)
     auto transition = switch_to(TcpState::Closed);
     if (transition)
     {
-        transition->error = err;
+        transition->error = std::make_error_code(ec);
     }
 
     return transition;
@@ -693,14 +693,14 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
     logger->debug("===> TCP session [{0}] zero window probe sent at seq {1}", session_id, target->sequence_number);
 }
 
-int TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
+std::expected<int, std::errc> TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
 {
     std::lock_guard lock(session_mutex);
 
     if (not is_writable())
     {
         logger->warn("{} session not writable, will ignore...", get_string_state());
-        return -ENOTCONN;
+        return std::unexpected(std::errc::not_connected);
     }
 
     int bytes_sent = 0;
@@ -755,11 +755,13 @@ co_async<> TcpSession::time_wait_timer(std::shared_ptr<TcpSession> session, std:
 void TcpSession::on_retransmission_failed()
 {
     logger->error("===> TCP session [{0}] segment retransmission failed on remote port {1}, closing session", session_id, remote.port);
-    close(-ETIMEDOUT);
+    close(std::errc::timed_out);
 }
 
-std::optional<TcpStateTransition> TcpSession::close(int error)
+std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
 {
+    const std::error_code error = std::make_error_code(ec);
+
     std::unique_lock mutex(session_mutex);
 
     stop_persist_probe();
@@ -787,14 +789,14 @@ std::optional<TcpStateTransition> TcpSession::close(int error)
             next_state = TcpState::Closed;
             break;
         case TcpState::Established:
-            if (error == 0)
+            if (not error)
             {
                 send_fin_segment();
                 next_state = TcpState::FinWait1;
             }
             else
             {
-                next_state == TcpState::Closed;
+                next_state = TcpState::Closed;
             }
             break;
         case TcpState::FinWait1: break;

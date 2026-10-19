@@ -117,7 +117,7 @@ TcpReadAwaiter TcpReadStream::read(std::span<uint8_t> data) const
     const int owned_fd = state ? state->get_read_fd() : -1;
     if (owned_fd < 0)
     {
-        return TcpReadAwaiter(-ENOTCONN);
+        return TcpReadAwaiter(std::errc::not_connected);
     }
 
     auto network = Runtime::current()->current_network();
@@ -176,7 +176,7 @@ TcpWriteAwaiter TcpWriteStream::write(std::span<uint8_t> data) const
     const int owned_fd = state ? state->get_write_fd() : -1;
     if (owned_fd < 0)
     {
-        return TcpWriteAwaiter(-ENOTCONN);
+        return TcpWriteAwaiter(std::errc::not_connected);
     }
 
     auto network = Runtime::current()->current_network();
@@ -273,7 +273,7 @@ TcpConnectAwaiter TcpSocket::connect(std::string_view addr)
         auto network = Runtime::current()->current_network();
         return TcpConnectAwaiter(network, address.value());
     }
-    return TcpConnectAwaiter(-EADDRNOTAVAIL);
+    return TcpConnectAwaiter(std::errc::address_not_available);
 }
 
 TcpReadAwaiter TcpSocket::read(std::span<uint8_t> data) const

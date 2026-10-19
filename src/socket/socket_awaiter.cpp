@@ -6,17 +6,17 @@
 
 namespace coro::net {
 
-AwaiterBase::AwaiterBase(std::shared_ptr<SocketRegistry> network)
+AwaiterBase::AwaiterBase(std::shared_ptr<SocketRegistry> network, SocketOperation operation)
     : network_stack(network)
+      , context(operation)
 {
 }
 
 CloseAwaiter::CloseAwaiter(std::shared_ptr<SocketRegistry> network, int fd, Protocol protocol)
-    : AwaiterBase(network)
+    : AwaiterBase(network, SocketOperation::Close)
+      , protocol(protocol)
 {
     context.fd = fd;
-    context.result = std::to_underlying(protocol);
-    context.operation = SocketOperation::Close;
 }
 
 bool CloseAwaiter::await_ready() const noexcept
@@ -27,37 +27,36 @@ bool CloseAwaiter::await_ready() const noexcept
 bool CloseAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 {
     context.handle = h;
-    bool done = network_stack->register_user_socket_operation(static_cast<Protocol>(context.result), &context);
+    bool done = network_stack->register_user_socket_operation(protocol, &context);
     return not done;
 }
 
 std::expected<void, std::error_code> CloseAwaiter::await_resume() const noexcept
 {
-    const int fd = context.result;
-    if (fd >= 0)
+    const int result = context.get_result();
+    if (result < 0)
     {
-        return {};
+        return std::unexpected(to_error_code(result));
     }
-    std::error_code ec(-fd, std::system_category());
-    return std::unexpected(ec);
+
+    return {};
 }
 
-UdpBindAwaiter::UdpBindAwaiter(int err)
-    : AwaiterBase(nullptr)
+UdpBindAwaiter::UdpBindAwaiter(std::errc ec)
+    : AwaiterBase(nullptr, SocketOperation::Bind)
 {
-    context.result = err;
+    context.set_failed_result(ec);
 }
 
 UdpBindAwaiter::UdpBindAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address)
-    : AwaiterBase(network)
+    : AwaiterBase(network, SocketOperation::Bind)
 {
     context.address = address;
-    context.operation = SocketOperation::Bind;
 }
 
 bool UdpBindAwaiter::await_ready() const noexcept
 {
-    return context.result < 0;
+    return context.get_result() < 0;
 }
 
 bool UdpBindAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
@@ -69,33 +68,32 @@ bool UdpBindAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 
 std::expected<UdpSocket, std::error_code> UdpBindAwaiter::await_resume() const noexcept
 {
-    const int fd = context.result;
-    if (fd > 0)
+    const int result = context.get_result();
+    if (result <= 0)
     {
-        return UdpSocket(fd, context.address);
+        return std::unexpected(to_error_code(result));
     }
-    std::error_code ec(-fd, std::system_category());
-    return std::unexpected(ec);
+
+    return UdpSocket(result, context.address);
 }
 
-UdpSendAwaiter::UdpSendAwaiter(int err)
-    : AwaiterBase(nullptr)
+UdpSendAwaiter::UdpSendAwaiter(std::errc ec)
+    : AwaiterBase(nullptr, SocketOperation::Write)
 {
-    context.result = err;
+    context.set_failed_result(ec);
 }
 
 UdpSendAwaiter::UdpSendAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer, const SocketAddress& address)
-    : AwaiterBase(network)
+    : AwaiterBase(network, SocketOperation::Write)
 {
     context.fd = fd;
     context.data = buffer;
     context.address = address;
-    context.operation = SocketOperation::Write;
 }
 
 bool UdpSendAwaiter::await_ready() const noexcept
 {
-    return context.result < 0;
+    return context.get_result() < 0;
 }
 
 bool UdpSendAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
@@ -107,28 +105,26 @@ bool UdpSendAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 
 std::expected<int, std::error_code> UdpSendAwaiter::await_resume() const noexcept
 {
-    const int res = context.result;
-    if (res > 0)
+    const int result = context.get_result();
+    if (result < 0)
     {
-        return res;
+        return std::unexpected(to_error_code(result));
     }
 
-    std::error_code ec(-res, std::system_category());
-    return std::unexpected(ec);
+    return result;
 }
 
-UdpReceiveAwaiter::UdpReceiveAwaiter(int err)
-    : AwaiterBase(nullptr)
+UdpReceiveAwaiter::UdpReceiveAwaiter(std::errc ec)
+    : AwaiterBase(nullptr, SocketOperation::Read)
 {
-    context.result = err;
+    context.set_failed_result(ec);
 }
 
 UdpReceiveAwaiter::UdpReceiveAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer)
-    : AwaiterBase(network)
+    : AwaiterBase(network, SocketOperation::Read)
 {
     context.fd = fd;
     context.data = buffer;
-    context.operation = SocketOperation::Read;
 }
 
 bool UdpReceiveAwaiter::await_ready() const noexcept
@@ -145,32 +141,30 @@ bool UdpReceiveAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 
 std::expected<std::pair<int, SocketAddress>, std::error_code> UdpReceiveAwaiter::await_resume() const noexcept
 {
-    const int res = context.result;
-    if (res >= 0)
+    const int result = context.get_result();
+    if (result < 0)
     {
-        return std::pair(res, context.address);
+        return std::unexpected(to_error_code(result));
     }
 
-    std::error_code ec(-res, std::system_category());
-    return std::unexpected(ec);
+    return std::pair(result, context.address);
 }
 
-TcpBindAwaiter::TcpBindAwaiter(int err)
-    : AwaiterBase(nullptr)
+TcpBindAwaiter::TcpBindAwaiter(std::errc ec)
+    : AwaiterBase(nullptr, SocketOperation::Bind)
 {
-    context.result = err;
+    context.set_failed_result(ec);
 }
 
 TcpBindAwaiter::TcpBindAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address)
-    : AwaiterBase(network)
+    : AwaiterBase(network, SocketOperation::Bind)
 {
     context.address = address;
-    context.operation = SocketOperation::Bind;
 }
 
 bool TcpBindAwaiter::await_ready() const noexcept
 {
-    return context.result < 0;
+    return context.get_result() < 0;
 }
 
 bool TcpBindAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
@@ -182,22 +176,21 @@ bool TcpBindAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 
 std::expected<TcpListener, std::error_code> TcpBindAwaiter::await_resume() const noexcept
 {
-    const int fd = context.result;
-    if (fd > 0)
+    const int result = context.get_result();
+    if (result <= 0)
     {
-        return TcpListener(fd, context.address);
+        return std::unexpected(to_error_code(result));
     }
-    std::error_code ec(-fd, std::system_category());
-    return std::unexpected(ec);
+
+    return TcpListener(result, context.address);
 }
 
 TcpAcceptAwaiter::TcpAcceptAwaiter(std::shared_ptr<SocketRegistry> network, int fd, const SocketAddress& local)
-    : AwaiterBase(network)
+    : AwaiterBase(network, SocketOperation::Accept)
       , local(local)
 {
     context.fd = fd;
     context.address = local;
-    context.operation = SocketOperation::Accept;
 }
 
 bool TcpAcceptAwaiter::await_ready() const noexcept
@@ -214,32 +207,31 @@ bool TcpAcceptAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 
 std::expected<TcpSocket, std::error_code> TcpAcceptAwaiter::await_resume() const noexcept
 {
-    const int fd = context.result;
-    if (fd > 0)
+    const int result = context.get_result();
+    if (result <= 0)
     {
-        return TcpSocket(fd, local, context.address);
+        return std::unexpected(to_error_code(result));
     }
-    std::error_code ec(-fd, std::system_category());
-    return std::unexpected(ec);
+
+    return TcpSocket(result, local, context.address);
 }
 
-TcpConnectAwaiter::TcpConnectAwaiter(int err)
-    : AwaiterBase(nullptr)
+TcpConnectAwaiter::TcpConnectAwaiter(std::errc ec)
+    : AwaiterBase(nullptr, SocketOperation::Connect)
 {
-    context.result = err;
+    context.set_failed_result(ec);
 }
 
 TcpConnectAwaiter::TcpConnectAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address)
-    : AwaiterBase(network),
+    : AwaiterBase(network, SocketOperation::Connect),
       remote(address)
 {
     context.address = address;
-    context.operation = SocketOperation::Connect;
 }
 
 bool TcpConnectAwaiter::await_ready() const noexcept
 {
-    return context.result < 0;
+    return context.get_result() < 0;
 }
 
 bool TcpConnectAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
@@ -251,32 +243,31 @@ bool TcpConnectAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 
 std::expected<TcpSocket, std::error_code> TcpConnectAwaiter::await_resume() const noexcept
 {
-    const int fd = context.result;
-    if (fd > 0)
+    const int result = context.get_result();
+    if (result <= 0)
     {
-        return TcpSocket(fd, context.address, remote);
+        return std::unexpected(to_error_code(result));
     }
-    std::error_code ec(-fd, std::system_category());
-    return std::unexpected(ec);
+
+    return TcpSocket(result, context.address, remote);
 }
 
-TcpWriteAwaiter::TcpWriteAwaiter(int err)
-    : AwaiterBase(nullptr)
+TcpWriteAwaiter::TcpWriteAwaiter(std::errc ec)
+    : AwaiterBase(nullptr, SocketOperation::Write)
 {
-    context.result = err;
+    context.set_failed_result(ec);
 }
 
 TcpWriteAwaiter::TcpWriteAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer)
-    : AwaiterBase(network)
+    : AwaiterBase(network, SocketOperation::Write)
 {
     context.fd = fd;
     context.data = buffer;
-    context.operation = SocketOperation::Write;
 }
 
 bool TcpWriteAwaiter::await_ready() const noexcept
 {
-    return context.result < 0;
+    return context.get_result() < 0;
 }
 
 bool TcpWriteAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
@@ -288,33 +279,31 @@ bool TcpWriteAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 
 std::expected<int, std::error_code> TcpWriteAwaiter::await_resume() const noexcept
 {
-    const int res = context.result;
-    if (res > 0)
+    const int result = context.get_result();
+    if (result < 0)
     {
-        return res;
+        return std::unexpected(to_error_code(result));
     }
 
-    std::error_code ec(-res, std::system_category());
-    return std::unexpected(ec);
+    return result;
 }
 
-TcpReadAwaiter::TcpReadAwaiter(int err)
-    : AwaiterBase(nullptr)
+TcpReadAwaiter::TcpReadAwaiter(std::errc ec)
+    : AwaiterBase(nullptr, SocketOperation::Read)
 {
-    context.result = err;
+    context.set_failed_result(ec);
 }
 
 TcpReadAwaiter::TcpReadAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer)
-    : AwaiterBase(network)
+    : AwaiterBase(network, SocketOperation::Read)
 {
     context.fd = fd;
     context.data = buffer;
-    context.operation = SocketOperation::Read;
 }
 
 bool TcpReadAwaiter::await_ready() const noexcept
 {
-    return context.result < 0;
+    return context.get_result() < 0;
 }
 
 bool TcpReadAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
@@ -326,14 +315,13 @@ bool TcpReadAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
 
 std::expected<int, std::error_code> TcpReadAwaiter::await_resume() const noexcept
 {
-    const int res = context.result;
-    if (res >= 0)
+    const int result = context.get_result();
+    if (result < 0)
     {
-        return res;
+        return std::unexpected(to_error_code(result));
     }
 
-    std::error_code ec(-res, std::system_category());
-    return std::unexpected(ec);
+    return result;
 }
 
 }

@@ -58,7 +58,7 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
             add_new_connection_session(conn_session);
 
             waiter->address = handle.remote;
-            waiter->result = conn_session->get_socket_fd();
+            waiter->set_succeed_result(conn_session->get_socket_fd());
             app->notify_user(waiter->handle);
         }
     }
@@ -170,13 +170,13 @@ bool TcpManager::check_connect_waiter_result(std::shared_ptr<TcpSession> session
     {
         assert(session->is_connected());
         result.waiter->address = session->get_local_address();
-        result.waiter->result = session->get_socket_fd();
+        result.waiter->set_succeed_result(session->get_socket_fd());
         return true;
     }
 
     if (result.kind == TcpSessionResult::Kind::Closed)
     {
-        result.waiter->result = result.error;
+        result.waiter->set_failed_result(result.error);
         return true;
     }
 
@@ -197,20 +197,20 @@ bool TcpManager::check_read_waiter_result(std::shared_ptr<TcpSession> session, c
         auto [count, eof] = session->read_into(result.waiter->data);
         if (count > 0)
         {
-            result.waiter->result = static_cast<int>(count);
+            result.waiter->set_succeed_result(static_cast<int>(count));
             return true;
         }
 
         if (eof)
         {
-            result.waiter->result = 0;
+            result.waiter->set_succeed_result(0);
             return true;
         }
     }
 
     if (result.kind == TcpSessionResult::Kind::Closed)
     {
-        result.waiter->result = result.error;
+        result.waiter->set_failed_result(result.error);
         return true;
     }
 
@@ -230,12 +230,13 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
             if (succeed)
             {
                 it->second = std::make_shared<TcpListenSession>(this, ctx->address);
-                ctx->result = it->second->get_socket_fd();
-                sockets.emplace(ctx->result, it->second);
+                const int fd = it->second->get_socket_fd();
+                ctx->set_succeed_result(fd);
+                sockets.emplace(fd, it->second);
             }
             else
             {
-                ctx->result = -EADDRINUSE;
+                ctx->set_failed_result(std::errc::address_in_use);
             }
         }
         else if (ctx->operation == SocketOperation::Accept)
@@ -245,14 +246,14 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
             {
                 if (listen_session->get_socket_fd() != ctx->fd)
                 {
-                    ctx->result = -EBADF;
+                    ctx->set_failed_result(std::errc::bad_file_descriptor);
                     break;
                 }
 
                 if (auto client_session = listen_session->accept_client())
                 {
                     ctx->address = client_session->get_remote_address();
-                    ctx->result = client_session->get_socket_fd();
+                    ctx->set_succeed_result(client_session->get_socket_fd());
                     add_new_connection_session(client_session);
                     break;
                 }
@@ -287,50 +288,58 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
                 break;
             }
 
-            ctx->result = -EADDRINUSE;
+            ctx->set_failed_result(std::errc::address_in_use);
         }
         else if (ctx->operation == SocketOperation::Write)
         {
             auto session = find_session_by_fd(ctx->fd);
             if (not session)
             {
-                ctx->result = -EBADF;
+                ctx->set_failed_result(std::errc::bad_file_descriptor);
                 break;
             }
 
             if (not session->is_writable())
             {
-                ctx->result = -ENOTCONN;
+                ctx->set_failed_result(std::errc::not_connected);
                 break;
             }
 
-            ctx->result = session->send_user_data(copy_user_data_to_buffer(ctx->data, session->get_send_mss()));
+            auto result = session->send_user_data(copy_user_data_to_buffer(ctx->data, session->get_send_mss()));
+            if (result.has_value())
+            {
+                ctx->set_succeed_result(result.value());
+            }
+            else
+            {
+                ctx->set_failed_result(result.error());
+            }
         }
         else if (ctx->operation == SocketOperation::Read)
         {
             auto session = find_session_by_fd(ctx->fd);
             if (not session)
             {
-                ctx->result = -EBADF;
+                ctx->set_failed_result(std::errc::bad_file_descriptor);
                 break;
             }
 
             if (not session->is_readable())
             {
-                ctx->result = -ENOTCONN;
+                ctx->set_failed_result(std::errc::not_connected);
                 break;
             }
 
             auto [count, is_eof] = session->read_into(ctx->data);
             if (count > 0)
             {
-                ctx->result = count;
+                ctx->set_succeed_result(static_cast<int>(count));
                 break;
             }
 
             if (is_eof)
             {
-                ctx->result = 0;
+                ctx->set_succeed_result(0);
                 break;
             }
 
@@ -342,7 +351,7 @@ bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
             if (auto session = find_session_by_fd(ctx->fd))
             {
                 session->close();
-                ctx->result = 0;
+                ctx->set_succeed_result(0);
             }
         }
     } while (false);

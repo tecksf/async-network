@@ -18,7 +18,7 @@ UdpBindAwaiter UdpSocket::bind(const std::string& addr)
         auto network = Runtime::current()->current_network();
         return UdpBindAwaiter(network, address.value());
     }
-    return UdpBindAwaiter(-EADDRNOTAVAIL);
+    return UdpBindAwaiter(std::errc::address_not_available);
 }
 
 UdpSocket::UdpSocket(int fd, const SocketAddress& address)
@@ -68,7 +68,7 @@ UdpSendAwaiter UdpSocket::send_to(std::span<uint8_t> data, const std::string& ad
     auto address = SocketAddress::from(addr);
     if (!address.has_value())
     {
-        return UdpSendAwaiter(-EADDRNOTAVAIL);
+        return UdpSendAwaiter(std::errc::address_not_available);
     }
 
     return send_to(data, address.value());
@@ -94,7 +94,7 @@ UdpSendAwaiter UdpSocket::send(std::span<uint8_t> data) const
 {
     if (!remote.has_value())
     {
-        return UdpSendAwaiter(-EADDRNOTAVAIL);
+        return UdpSendAwaiter(std::errc::address_not_available);
     }
 
     return send_to(data, remote.value());

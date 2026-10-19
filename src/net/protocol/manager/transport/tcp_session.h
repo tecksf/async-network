@@ -14,6 +14,7 @@
 #include <span>
 #include <string_view>
 #include <vector>
+#include <expected>
 #include <spdlog/spdlog.h>
 #include <protocol/capability/application.h>
 #include <protocol/capability/transport.h>
@@ -76,13 +77,13 @@ struct TcpSessionResult {
 
     Kind kind = Kind::None;
     UserSocketContext* waiter = nullptr;
-    int error = 0;
+    std::error_code error;
 };
 
 struct TcpStateTransition {
     TcpState prev;
     TcpState next;
-    int error = 0;
+    std::error_code error;
 };
 
 class TcpSessionEvent {
@@ -113,8 +114,8 @@ public:
     uint32_t get_send_mss() const;
 
     [[nodiscard]] TcpSessionResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
-    std::optional<TcpStateTransition> close(int error = 0);
-    int send_user_data(const std::vector<SocketBuffer>& payloads);
+    std::optional<TcpStateTransition> close(std::errc ec = std::errc{});
+    std::expected<int, std::errc> send_user_data(const std::vector<SocketBuffer>& payloads);
     virtual TcpSessionResult try_to_add_read_waiter(UserSocketContext* ctx) { return {}; }
 
 protected:
@@ -154,7 +155,7 @@ protected:
 
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> process_tcp_reset(const TcpSegment& header);
     TCP_LOCK_REQUIRED bool verify_reset_sequence(uint32_t seq_num);
-    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> abort_session(int err);
+    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> abort_session(std::errc ec);
 
 protected:
     app::ApplicationService* app;
@@ -180,7 +181,7 @@ protected:
     std::shared_ptr<std::atomic<bool>> persist_cancelled = nullptr;
     TcpSendWindow send_window;
     TcpReceiveWindow receive_window;
-    int closed_reason = 0;
+    std::error_code closed_reason;
 };
 
 class TcpConnectSession : public TcpSession {

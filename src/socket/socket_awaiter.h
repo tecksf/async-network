@@ -14,7 +14,7 @@ class TcpSocket;
 class TcpListener;
 
 struct AwaiterBase {
-    explicit AwaiterBase(std::shared_ptr<SocketRegistry> network);
+    AwaiterBase(std::shared_ptr<SocketRegistry> network, SocketOperation operation);
     std::shared_ptr<SocketRegistry> network_stack;
     UserSocketContext context;
 };
@@ -24,10 +24,13 @@ struct CloseAwaiter : AwaiterBase {
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
     std::expected<void, std::error_code> await_resume() const noexcept;
+
+private:
+    Protocol protocol = Protocol::TCP;
 };
 
 struct UdpBindAwaiter : AwaiterBase {
-    explicit UdpBindAwaiter(int err);
+    explicit UdpBindAwaiter(std::errc ec);
     UdpBindAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
@@ -35,7 +38,7 @@ struct UdpBindAwaiter : AwaiterBase {
 };
 
 struct UdpSendAwaiter : AwaiterBase {
-    explicit UdpSendAwaiter(int err);
+    explicit UdpSendAwaiter(std::errc ec);
     UdpSendAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer, const SocketAddress& address);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
@@ -43,7 +46,7 @@ struct UdpSendAwaiter : AwaiterBase {
 };
 
 struct UdpReceiveAwaiter : AwaiterBase {
-    explicit UdpReceiveAwaiter(int err);
+    explicit UdpReceiveAwaiter(std::errc ec);
     UdpReceiveAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
@@ -52,7 +55,7 @@ struct UdpReceiveAwaiter : AwaiterBase {
 
 
 struct TcpBindAwaiter : AwaiterBase {
-    explicit TcpBindAwaiter(int err);
+    explicit TcpBindAwaiter(std::errc ec);
     TcpBindAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
@@ -70,7 +73,7 @@ private:
 };
 
 struct TcpConnectAwaiter : AwaiterBase {
-    explicit TcpConnectAwaiter(int err);
+    explicit TcpConnectAwaiter(std::errc ec);
     TcpConnectAwaiter(std::shared_ptr<SocketRegistry> network, const SocketAddress& address);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
@@ -81,7 +84,7 @@ private:
 };
 
 struct TcpWriteAwaiter : AwaiterBase {
-    explicit TcpWriteAwaiter(int err);
+    explicit TcpWriteAwaiter(std::errc ec);
     TcpWriteAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
@@ -89,7 +92,7 @@ struct TcpWriteAwaiter : AwaiterBase {
 };
 
 struct TcpReadAwaiter : AwaiterBase {
-    explicit TcpReadAwaiter(int err);
+    explicit TcpReadAwaiter(std::errc ec);
     TcpReadAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
