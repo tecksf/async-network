@@ -148,13 +148,15 @@ public:
         return sequence;
     }
 
-    static void build_reply(const SocketBuffer& outbound, std::span<uint8_t> payload)
+    static SocketBuffer build_reply(const SocketBuffer& outbound, std::span<uint8_t> payload)
     {
-        Icmpv4Packet packet(outbound->allocate(HeaderSize), true);
+        SocketBuffer reply = outbound;
+        Icmpv4Packet packet(reply->allocate(HeaderSize), true);
         packet.set_type(IcmpType::EchoReply);
         packet.set_payload(payload);
         packet.set_code(0);
         packet.seal();
+        return reply;
     }
 
 private:

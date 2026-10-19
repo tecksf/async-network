@@ -86,12 +86,13 @@ std::optional<MacAddress> LinkManager::retrieve_mac_address(const IpAddress& ip,
 
 co_async<> LinkManager::on_ethernet_frame_received(const SocketBuffer& inbound) const
 {
-    const auto input = EthernetFrame::build(inbound->get_header_payload());
+    SocketBuffer buffer = inbound;
+    const auto input = EthernetFrame::build(buffer->get_header_payload());
     if (!input.has_value())
     {
         co_return;
     }
-    inbound->consume(EthernetFrame::HeaderSize);
+    buffer->consume(EthernetFrame::HeaderSize);
 
     EthernetFrame frame = input.value();
     MacAddress mac = frame.get_destination_mac();
@@ -108,10 +109,10 @@ co_async<> LinkManager::on_ethernet_frame_received(const SocketBuffer& inbound) 
     switch (frame.get_protocol())
     {
         case Protocol::ARP:
-            co_await link->on_arp_packet_received(inbound);
+            co_await link->on_arp_packet_received(buffer);
             break;
         case Protocol::IPv4:
-            co_await inet->on_ipv4_packet_received(inbound);
+            co_await inet->on_ipv4_packet_received(buffer);
             break;
         default:
             break;
@@ -120,30 +121,32 @@ co_async<> LinkManager::on_ethernet_frame_received(const SocketBuffer& inbound) 
 
 co_async<> LinkManager::async_send_ethernet_frame(const SocketBuffer& outbound, const EthernetContext& ctx) const
 {
-    if (outbound->size() > static_cast<size_t>(config.ethernet_mtu))
+    SocketBuffer frame_buffer = outbound;
+    if (frame_buffer->size() > static_cast<size_t>(config.ethernet_mtu))
     {
-        logger->error("Ethernet payload is more than MTU({} bytes), size={}, will drop", config.ethernet_mtu, outbound->size());
+        logger->error("Ethernet payload is more than MTU({} bytes), size={}, will drop", config.ethernet_mtu, frame_buffer->size());
         co_return;
     }
 
-    EthernetFrame frame(outbound->allocate(EthernetFrame::HeaderSize));
+    EthernetFrame frame(frame_buffer->allocate(EthernetFrame::HeaderSize));
     frame.set_protocol(ctx.protocol);
     frame.set_destination_mac(ctx.destination);
     frame.set_source_mac(link->get_host_mac());
 
-    auto msg = outbound->get_header_payload();
+    auto msg = frame_buffer->get_header_payload();
     phy->deliver_message(msg.data(), msg.size());
     co_return;
 }
 
-co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound)
+co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound) const
 {
-    const auto input = ArpPacket::build(inbound->get_header_payload());
+    SocketBuffer buffer = inbound;
+    const auto input = ArpPacket::build(buffer->get_header_payload());
     if (!input.has_value())
     {
         co_return;
     }
-    inbound->consume(ArpPacket::HeaderSize);
+    buffer->consume(ArpPacket::HeaderSize);
 
     ArpPacket packet = input.value();
     if (not packet.is_valid())
@@ -168,12 +171,13 @@ co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound)
     context.ip = ip;
     context.mac = mac;
 
-    co_await async_send_arp_packet(inbound, context);
+    co_await async_send_arp_packet(buffer, context);
 }
 
 co_async<> LinkManager::async_send_arp_packet(const SocketBuffer& outbound, const ArpContext& ctx) const
 {
-    ArpPacket packet(outbound->allocate(ArpPacket::HeaderSize), true);
+    SocketBuffer frame = outbound;
+    ArpPacket packet(frame->allocate(ArpPacket::HeaderSize), true);
     packet.set_operate_code(ctx.operate_code);
     packet.set_target_ip(ctx.ip);
     packet.set_target_mac(ctx.mac);
@@ -184,7 +188,7 @@ co_async<> LinkManager::async_send_arp_packet(const SocketBuffer& outbound, cons
     context.protocol = ctx.protocol;
     context.destination = ctx.mac;
 
-    co_await link->async_send_ethernet_frame(outbound, context);
+    co_await link->async_send_ethernet_frame(frame, context);
 }
 
 co_async<> LinkManager::async_send_arp_request_operation(IpAddress ip) const

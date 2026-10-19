@@ -656,7 +656,8 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
         return;
     }
 
-    auto data = payload->allocate(1);
+    SocketBuffer probe = payload;
+    auto data = probe->allocate(1);
     if (data.empty())
     {
         return;
@@ -670,7 +671,7 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
     // number is one byte past next_sequence; record the probe sequence so the send window can tolerate
     // that byte and recover the window information, otherwise the connection would stay stuck at a
     // zero window.
-    SocketBuffer outbound = compose_tcp_segment(payload, TcpSegment::FLAG_ACK | TcpSegment::FLAG_PSH, target->sequence_number);
+    SocketBuffer outbound = compose_tcp_segment(probe, TcpSegment::FLAG_ACK | TcpSegment::FLAG_PSH, target->sequence_number);
     TcpContext context{};
     context.ip = remote.ip;
     context.protocol = Protocol::TCP;

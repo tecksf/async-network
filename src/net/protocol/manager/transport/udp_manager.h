@@ -35,7 +35,7 @@ public:
     ~UdpManager();
 
     co_async<> on_udp_segment_received(const SocketBuffer& inbound, const UdpContext& ctx);
-    co_async<> async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const UdpContext ctx) const;
+    co_async<> async_send_udp_segment(std::vector<SocketBuffer> outbounds, const UdpContext ctx) const;
     bool handle_user_socket_operation(UserSocketContext* ctx);
 
 private:

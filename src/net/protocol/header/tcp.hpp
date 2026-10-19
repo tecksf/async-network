@@ -54,7 +54,7 @@ public:
     {
         Checksum checksum_maker;
         checksum_maker.input(fake_header.get_data());
-        for (auto it = header_with_payload->begin(); it != header_with_payload->end(); ++it)
+        for (auto it = header_with_payload->cbegin(); it != header_with_payload->cend(); ++it)
         {
             checksum_maker.input_u8(*it);
         }

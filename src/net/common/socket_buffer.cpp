@@ -4,7 +4,7 @@
 
 namespace coro::net {
 
-size_t SocketBufferInterface::size()
+size_t SocketBufferInterface::size() const
 {
     return 0;
 }
@@ -81,12 +81,22 @@ SocketBuffer SocketBuffer::clone() const
     return impl ? SocketBuffer(impl->clone()) : SocketBuffer{};
 }
 
-SocketBufferInterface* SocketBuffer::operator->() const
+SocketBufferInterface* SocketBuffer::operator->()
 {
     return impl.get();
 }
 
-SocketBufferInterface& SocketBuffer::operator*() const
+SocketBufferInterface& SocketBuffer::operator*()
+{
+    return *impl;
+}
+
+const SocketBufferInterface* SocketBuffer::operator->() const
+{
+    return impl.get();
+}
+
+const SocketBufferInterface& SocketBuffer::operator*() const
 {
     return *impl;
 }
@@ -141,7 +151,7 @@ std::shared_ptr<SocketBufferInterface> SocketBufferImpl::clone() const
     return view;
 }
 
-size_t SocketBufferImpl::size()
+size_t SocketBufferImpl::size() const
 {
     return payload.size();
 }
@@ -212,7 +222,7 @@ std::shared_ptr<SocketBufferInterface> BulkSocketBufferImpl::clone() const
     return view;
 }
 
-size_t BulkSocketBufferImpl::size()
+size_t BulkSocketBufferImpl::size() const
 {
     size_t size = 0;
     for (const auto& in: buffer)

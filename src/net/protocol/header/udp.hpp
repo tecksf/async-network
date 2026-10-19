@@ -33,7 +33,7 @@ public:
         checksum_maker.input(fakeHeader.get_data());
         for (const auto& outbound: header_with_payload)
         {
-            for (auto it = outbound->begin(); it != outbound->end(); ++it)
+            for (auto it = outbound->cbegin(); it != outbound->cend(); ++it)
             {
                 checksum_maker.input_u8(*it);
             }

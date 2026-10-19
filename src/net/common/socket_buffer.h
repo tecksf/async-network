@@ -120,7 +120,7 @@ public:
     virtual void reclaim() = 0;
     virtual std::shared_ptr<SocketBufferInterface> clone() const = 0;
 
-    virtual size_t size();
+    virtual size_t size() const;
     virtual int get_sequence() const;
     virtual void set_sequence(int s);
 
@@ -149,8 +149,10 @@ public:
     static SocketBuffer reuse_for_outbound(const SocketBuffer& inbound);
     static SocketBuffer make_outbound_view(uint8_t* ptr, size_t capacity);
     SocketBuffer clone() const;
-    SocketBufferInterface* operator->() const;
-    SocketBufferInterface& operator*() const;
+    SocketBufferInterface* operator->();
+    SocketBufferInterface& operator*();
+    const SocketBufferInterface* operator->() const;
+    const SocketBufferInterface& operator*() const;
     explicit operator bool() const;
     void reset();
 
@@ -178,7 +180,7 @@ public:
     SocketBufferImpl(std::shared_ptr<SocketBuffer::Storage> storage, std::span<uint8_t> payload);
 
     std::shared_ptr<SocketBufferInterface> clone() const override;
-    size_t size() override;
+    size_t size() const override;
     std::span<uint8_t> allocate(std::size_t size) override;
     size_t consume(size_t n, Dir dir = Dir::Backward) override;
     std::span<uint8_t> get_header_payload() const override;
@@ -198,7 +200,7 @@ public:
     void add(const SocketBuffer& buf);
 
     std::shared_ptr<SocketBufferInterface> clone() const override;
-    size_t size() override;
+    size_t size() const override;
     size_t consume(size_t n, Dir dir = Dir::Backward) override;
     std::span<uint8_t> get_header_payload() const override;
     std::span<uint8_t> allocate(std::size_t size) override;

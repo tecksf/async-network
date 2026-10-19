@@ -42,13 +42,14 @@ Ipv4Manager::~Ipv4Manager()
 
 co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
 {
-    const auto input = Ipv4Packet::build(inbound->get_header_payload());
+    SocketBuffer buffer = inbound;
+    const auto input = Ipv4Packet::build(buffer->get_header_payload());
     if (!input.has_value())
     {
         co_return;
     }
-    const size_t payload_size = inbound->size();
-    inbound->consume(Ipv4Packet::HeaderSize);
+    const size_t payload_size = buffer->size();
+    buffer->consume(Ipv4Packet::HeaderSize);
 
     Ipv4Packet packet = input.value();
     if (not packet.is_valid())
@@ -58,7 +59,7 @@ co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
     }
 
     // consume Ethernet II padding
-    inbound->consume(payload_size - packet.get_total_length(), Dir::Forward);
+    buffer->consume(payload_size - packet.get_total_length(), Dir::Forward);
 
     if (packet.get_destination_ip() != inet->get_host_ip())
     {
@@ -69,10 +70,10 @@ co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
     // logger->info("receive IP packet: sender ip={}, identification={}, fragment offset={}",
     //                     std::string(packet.get_source_ip()), packet.get_identification(), packet.get_fragment_offset());
 
-    SocketBuffer whole_inbound = inbound;
+    SocketBuffer whole_inbound = buffer;
     if (packet.is_fragment())
     {
-        whole_inbound = assemble_ipv4_fragment(packet, inbound);
+        whole_inbound = assemble_ipv4_fragment(packet, buffer);
         if (not whole_inbound)
         {
             co_return;
@@ -116,8 +117,10 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const SocketBuffer& outbound, con
     context.protocol = Protocol::IPv4;
     context.destination = mac.value();
 
-    Ipv4Packet packet(outbound->allocate(Ipv4Packet::HeaderSize), true);
-    packet.set_total_length(outbound->size());
+    SocketBuffer buffer = outbound;
+
+    Ipv4Packet packet(buffer->allocate(Ipv4Packet::HeaderSize), true);
+    packet.set_total_length(buffer->size());
     packet.set_identification(fetch_identification());
     packet.set_protocol(ctx.protocol);
     packet.set_time_to_live(static_cast<uint8_t>(config.time_to_live));
@@ -125,7 +128,7 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const SocketBuffer& outbound, con
     packet.set_destination_ip(ctx.destination);
     packet.seal();
 
-    co_await link->async_send_ethernet_frame(outbound, context);
+    co_await link->async_send_ethernet_frame(buffer, context);
 }
 
 co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& outbounds, const Ipv4Context& ctx)
@@ -151,10 +154,11 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& 
     size_t current = 1;
     const auto id = fetch_identification();
 
-    for (auto& outbound: outbounds)
+    for (const auto& outbound: outbounds)
     {
-        const size_t payload_size = outbound->size();
-        Ipv4Packet packet(outbound->allocate(Ipv4Packet::HeaderSize), true);
+        SocketBuffer frame = outbound;
+        const size_t payload_size = frame->size();
+        Ipv4Packet packet(frame->allocate(Ipv4Packet::HeaderSize), true);
         packet.set_total_length(Ipv4Packet::HeaderSize + payload_size);
         packet.set_identification(id);
         packet.set_fragment_offset(offset / Ipv4Packet::FragmentAlignment);
@@ -176,7 +180,7 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& 
         offset += payload_size;
         current++;
 
-        co_await link->async_send_ethernet_frame(outbound, context);
+        co_await link->async_send_ethernet_frame(frame, context);
     }
 }
 
@@ -216,8 +220,9 @@ SocketBuffer Ipv4Manager::assemble_ipv4_fragment(const Ipv4Packet& packet, const
         return nullptr;
     }
 
-    inbound->set_sequence(packet.get_fragment_offset());
-    fragment_entry.bulk_inbound->add(inbound);
+    SocketBuffer fragment = inbound;
+    fragment->set_sequence(packet.get_fragment_offset());
+    fragment_entry.bulk_inbound->add(fragment);
     if (packet.is_last_fragment())
     {
         fragment_entry.total_payload_length = finish;

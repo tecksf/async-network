@@ -296,7 +296,8 @@ void TcpListenSession::send_syn_ack_without_retransmission(const SocketBuffer& o
                                                            std::uint32_t client_isn) const
 {
     constexpr size_t header_size = TcpSegment::HeaderSize + TcpOption::MssOptionSize;
-    auto text = outbound->allocate(header_size);
+    SocketBuffer frame = outbound;
+    auto text = frame->allocate(header_size);
 
     TcpSegment segment(text, true);
     segment.set_source_port(local.port);
@@ -312,12 +313,12 @@ void TcpListenSession::send_syn_ack_without_retransmission(const SocketBuffer& o
     fake_header.set_destination_ip(client.ip);
     fake_header.set_protocol(Protocol::TCP);
     fake_header.set_length(header_size);
-    segment.seal(fake_header, outbound);
+    segment.seal(fake_header, frame);
 
     TcpContext context{};
     context.ip = client.ip;
     context.protocol = Protocol::TCP;
-    app->sumit_task(trans->async_send_tcp_segment(outbound, context));
+    app->sumit_task(trans->async_send_tcp_segment(frame, context));
 }
 
 void TcpListenSession::collect_expired_accepts(std::vector<std::shared_ptr<TcpConnectSession>>& expired)

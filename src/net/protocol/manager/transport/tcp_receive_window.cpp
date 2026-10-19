@@ -150,27 +150,28 @@ bool TcpReceiveWindow::reassemble(uint32_t seq_number, const SocketBuffer& paylo
         return false;
     }
 
+    SocketBuffer segment_payload = payload;
     if (seq_number < next_expected_sequence)
     {
         const uint32_t overlay = next_expected_sequence - seq_number;
-        if (overlay >= payload->size())
+        if (overlay >= segment_payload->size())
         {
             return false;
         }
 
-        payload->consume(overlay);
+        segment_payload->consume(overlay);
         seq_number = next_expected_sequence;
     }
 
-    if (used_bytes + payload->size() > max_window)
+    if (used_bytes + segment_payload->size() > max_window)
     {
         return false;
     }
 
     const uint32_t before = next_expected_sequence;
 
-    buffer.insert(Segment{seq_number, payload});
-    used_bytes += payload->size();
+    buffer.insert(Segment{seq_number, segment_payload});
+    used_bytes += segment_payload->size();
 
     advance_next_expected_sequence();
 

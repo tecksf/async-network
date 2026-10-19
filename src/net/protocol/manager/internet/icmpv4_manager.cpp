@@ -14,12 +14,13 @@ Icmpv4Manager::~Icmpv4Manager()
 
 co_async<> Icmpv4Manager::on_icmp_v4_packet_received(const SocketBuffer& inbound, const IcmpContext& ctx) const
 {
-    const auto input = Icmpv4Packet::build(inbound->get_header_payload());
+    SocketBuffer buffer = inbound;
+    const auto input = Icmpv4Packet::build(buffer->get_header_payload());
     if (!input.has_value())
     {
         co_return;
     }
-    inbound->consume(Icmpv4Packet::HeaderSize);
+    buffer->consume(Icmpv4Packet::HeaderSize);
 
     Icmpv4Packet packet = input.value();
     if (not packet.is_valid())
@@ -32,11 +33,12 @@ co_async<> Icmpv4Manager::on_icmp_v4_packet_received(const SocketBuffer& inbound
     context.payload = packet.getPayload();
     context.icmp_type = static_cast<int>(packet.get_type());
 
-    co_await async_send_icmp_v4_packet(inbound, context);
+    co_await async_send_icmp_v4_packet(buffer, context);
 }
 
 co_async<> Icmpv4Manager::async_send_icmp_v4_packet(const SocketBuffer& outbound, const IcmpContext& ctx) const
 {
+    SocketBuffer buffer = outbound;
     IcmpType type = static_cast<IcmpType>(ctx.icmp_type);
     switch (type)
     {
@@ -51,7 +53,7 @@ co_async<> Icmpv4Manager::async_send_icmp_v4_packet(const SocketBuffer& outbound
         case IcmpType::AlternateHostAddress:
             break;
         case IcmpType::Echo:
-            EchoPacket::build_reply(outbound, ctx.payload);
+            buffer = EchoPacket::build_reply(outbound, ctx.payload);
             break;
         case IcmpType::RouterAdvertisement:
             break;
@@ -69,7 +71,7 @@ co_async<> Icmpv4Manager::async_send_icmp_v4_packet(const SocketBuffer& outbound
     context.protocol = Protocol::ICMPv4;
     context.destination = ctx.source;
 
-    co_await inet->async_send_ipv4_packet(outbound, context);
+    co_await inet->async_send_ipv4_packet(buffer, context);
 }
 
 }

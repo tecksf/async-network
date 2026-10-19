@@ -15,7 +15,8 @@ UdpManager::~UdpManager()
 
 co_async<> UdpManager::on_udp_segment_received(const SocketBuffer& inbound, const UdpContext& ctx)
 {
-    const auto input = UdpSegment::build(inbound->get_header_payload());
+    SocketBuffer buffer = inbound;
+    const auto input = UdpSegment::build(buffer->get_header_payload());
     if (!input.has_value())
     {
         co_return;
@@ -25,10 +26,10 @@ co_async<> UdpManager::on_udp_segment_received(const SocketBuffer& inbound, cons
     fakeHeader.set_source_ip(ctx.ip);
     fakeHeader.set_destination_ip(inet->get_host_ip());
     fakeHeader.set_protocol(Protocol::UDP);
-    fakeHeader.set_length(inbound->size());
+    fakeHeader.set_length(buffer->size());
 
     UdpSegment segment = input.value();
-    if (not segment.verify(fakeHeader, inbound))
+    if (not segment.verify(fakeHeader, buffer))
     {
         logger->error("Invalid UDP Segment, checksum error");
         co_return;
@@ -40,15 +41,15 @@ co_async<> UdpManager::on_udp_segment_received(const SocketBuffer& inbound, cons
         co_return;
     }
 
-    inbound->consume(UdpSegment::HeaderSize);
+    buffer->consume(UdpSegment::HeaderSize);
 
     UdpSocketHandle handle(inet->get_host_ip(), segment.get_destination_port());
     SocketAddress client(ctx.ip, segment.get_source_port());
 
-    handle_udp_data_from_network(handle, client, inbound);
+    handle_udp_data_from_network(handle, client, buffer);
 }
 
-co_async<> UdpManager::async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const UdpContext ctx) const
+co_async<> UdpManager::async_send_udp_segment(std::vector<SocketBuffer> outbounds, const UdpContext ctx) const
 {
     size_t size = outbounds.size();
     if (size == 0)
@@ -184,7 +185,7 @@ void UdpManager::handle_udp_data_from_network(const UdpSocketHandle& handle, con
         entry->waiters.pop_front();
 
         const int len = std::min(inbound->size(), waiter->data.size());
-        std::copy_n(inbound->begin(), len, waiter->data.begin());
+        std::copy_n(inbound->cbegin(), len, waiter->data.begin());
         waiter->result = len;
         waiter->address = client;
 
