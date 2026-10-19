@@ -23,9 +23,7 @@ struct SocketQueueEntry {
     };
 
     std::deque<UserData> user_data;
-    std::deque<UserSocketContext*> waiters;
-
-    uint16_t local_port;
+    std::deque<UdpSocketUser*> waiters;
 };
 
 class UdpManager {
@@ -36,7 +34,7 @@ public:
 
     co_async<> on_udp_segment_received(const SocketBuffer& inbound, const UdpContext& ctx);
     co_async<> async_send_udp_segment(std::vector<SocketBuffer> outbounds, const UdpContext ctx) const;
-    bool handle_user_socket_operation(UserSocketContext* ctx);
+    bool handle_user_socket_operation(UdpSocketUser* user);
 
 private:
     void handle_udp_data_from_network(const UdpSocketHandle& handle, const SocketAddress& client, const SocketBuffer& inbound);
@@ -51,8 +49,7 @@ private:
     const UdpConfig config;
 
     std::mutex socket_mutex;
-    std::map<int, std::shared_ptr<SocketQueueEntry>> sockets;
-    std::map<UdpSocketHandle, std::shared_ptr<SocketQueueEntry>> socket_queue;
+    std::map<UdpSocketHandle, std::shared_ptr<SocketQueueEntry>> sockets;
 };
 }
 

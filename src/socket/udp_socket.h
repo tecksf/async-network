@@ -6,10 +6,10 @@
 
 namespace coro::net {
 
-class UdpSocket : public Socket {
+class UdpSocket {
 public:
     friend UdpBindAwaiter;
-    ~UdpSocket() override;
+    ~UdpSocket();
 
     UdpSocket(const UdpSocket&) = delete;
     UdpSocket& operator=(const UdpSocket&) = delete;
@@ -30,9 +30,10 @@ public:
     CloseAwaiter close();
 
 private:
-    explicit UdpSocket(int fd, const SocketAddress& address);
+    explicit UdpSocket(const SocketAddress& local);
+    void release() noexcept;
 
-    SocketAddress local;
+    std::optional<SocketAddress> local;
     std::optional<SocketAddress> remote;
 };
 

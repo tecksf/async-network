@@ -21,36 +21,48 @@ UdpBindAwaiter UdpSocket::bind(const std::string& addr)
     return UdpBindAwaiter(std::errc::address_not_available);
 }
 
-UdpSocket::UdpSocket(int fd, const SocketAddress& address)
-    : Socket(fd)
-      , local(address)
+UdpSocket::UdpSocket(const SocketAddress& local)
+    : local(local)
 {
 }
 
 UdpSocket::UdpSocket(UdpSocket&& other) noexcept
-    : Socket(other.fd)
-      , local(other.local)
+    : local(other.local)
       , remote(std::move(other.remote))
 {
-    other.fd = -1;
+    other.local.reset();
 }
 
 UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
 {
     if (this != &other)
     {
-        Socket::close(Protocol::UDP);
-        fd = other.fd;
+        release();
         local = other.local;
         remote = std::move(other.remote);
-        other.fd = -1;
+        other.local.reset();
     }
     return *this;
 }
 
 UdpSocket::~UdpSocket()
 {
-    Socket::close(Protocol::UDP);
+    release();
+}
+
+void UdpSocket::release() noexcept
+{
+    if (not local)
+    {
+        return;
+    }
+
+    UdpSocketUser context(SocketOperation::Close);
+    context.local = local.value();
+    local.reset();
+
+    auto network = Runtime::current()->current_network();
+    network->register_udp_socket_operation(&context);
 }
 
 void UdpSocket::connect(const std::string& addr)
@@ -81,8 +93,13 @@ UdpSendAwaiter UdpSocket::send_to(std::string_view data, const SocketAddress& ad
 
 UdpSendAwaiter UdpSocket::send_to(std::span<uint8_t> data, const SocketAddress& addr) const
 {
+    if (not local)
+    {
+        return UdpSendAwaiter(std::errc::not_connected);
+    }
+
     auto network = Runtime::current()->current_network();
-    return UdpSendAwaiter(network, fd, data, addr);
+    return UdpSendAwaiter(network, local.value(), data, addr);
 }
 
 UdpSendAwaiter UdpSocket::send(std::string_view data) const
@@ -102,15 +119,25 @@ UdpSendAwaiter UdpSocket::send(std::span<uint8_t> data) const
 
 UdpReceiveAwaiter UdpSocket::receive_from(std::span<uint8_t> data) const
 {
+    if (not local)
+    {
+        return UdpReceiveAwaiter(std::errc::not_connected);
+    }
+
     auto network = Runtime::current()->current_network();
-    return UdpReceiveAwaiter(network, fd, data);
+    return UdpReceiveAwaiter(network, local.value(), data);
 }
 
 CloseAwaiter UdpSocket::close()
 {
+    if (not local)
+    {
+        return CloseAwaiter();
+    }
+
     auto network = Runtime::current()->current_network();
-    auto awaiter = CloseAwaiter(network, fd, Protocol::UDP);
-    fd = -1;
+    CloseAwaiter awaiter(network, local.value());
+    local.reset();
     return awaiter;
 }
 

@@ -74,6 +74,52 @@ std::pair<size_t, bool> TcpSession::read_into(std::span<uint8_t> out)
     return std::pair{count, eof};
 }
 
+TcpSessionResult TcpSession::try_to_add_read_waiter(TcpSocketUser* ctx)
+{
+    TcpSessionResult result;
+    if (ctx == nullptr)
+    {
+        return result;
+    }
+
+    std::lock_guard lock(session_mutex);
+
+    if (is_readable())
+    {
+        if (receive_window.has_readable_data())
+        {
+            result.kind = TcpSessionResult::Kind::Readable;
+        }
+        else if (receive_window.is_eof())
+        {
+            result.kind = TcpSessionResult::Kind::EndOfStream;
+        }
+    }
+    else
+    {
+        result.kind = TcpSessionResult::Kind::Closed;
+        result.error = closed_reason != std::errc{} ? closed_reason : std::errc::not_connected;
+    }
+
+    if (result.kind == TcpSessionResult::Kind::None)
+    {
+        waiter = ctx;
+    }
+    else
+    {
+        result.waiter = ctx;
+    }
+
+    return result;
+}
+
+TcpSocketUser* TcpSession::take_waiter()
+{
+    auto w = waiter;
+    waiter = nullptr;
+    return w;
+}
+
 bool TcpSession::is_closed() const
 {
     return state.load(std::memory_order_acquire) == TcpState::Closed;
@@ -526,7 +572,8 @@ std::optional<TcpStateTransition> TcpSession::abort_session(std::errc ec)
     auto transition = switch_to(TcpState::Closed);
     if (transition)
     {
-        transition->error = std::make_error_code(ec);
+        transition->error = ec;
+        closed_reason = ec;
     }
 
     return transition;
@@ -693,14 +740,38 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
     logger->debug("===> TCP session [{0}] zero window probe sent at seq {1}", session_id, target->sequence_number);
 }
 
+std::expected<int, std::errc> TcpSession::send_user_data(std::span<uint8_t> user_data)
+{
+    std::vector<SocketBuffer> payloads;
+    const size_t max_mtu_payload = static_cast<size_t>(tcp_config.mtu) - TcpSegment::HeaderSize;
+    const size_t max_capacity = std::clamp<size_t>(get_send_mss(), 1, max_mtu_payload);
+
+    std::span<uint8_t> rest = user_data;
+    while (not rest.empty())
+    {
+        const size_t len = std::min(rest.size(), max_capacity);
+        auto outbound = app->allocate_socket_buffer();
+        outbound->allocate(len);
+        std::copy_n(rest.begin(), len, outbound->begin());
+        payloads.push_back(outbound);
+
+        rest = rest.subspan(len);
+    }
+
+    return send_user_data(payloads);
+}
+
 std::expected<int, std::errc> TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
 {
     std::lock_guard lock(session_mutex);
 
     if (not is_writable())
     {
-        logger->warn("{} session not writable, will ignore...", get_string_state());
-        return std::unexpected(std::errc::not_connected);
+        // The socket keeps this session alive after the manager unregisters it, so a write that
+        // arrives too late still reports why the connection is gone (reset, timeout, local close).
+        const std::errc reason = closed_reason != std::errc{} ? closed_reason : std::errc::not_connected;
+        // logger->warn("{} session not writable, will ignore...", get_string_state());
+        return std::unexpected(reason);
     }
 
     int bytes_sent = 0;
@@ -760,8 +831,6 @@ void TcpSession::on_retransmission_failed()
 
 std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
 {
-    const std::error_code error = std::make_error_code(ec);
-
     std::unique_lock mutex(session_mutex);
 
     stop_persist_probe();
@@ -789,7 +858,7 @@ std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
             next_state = TcpState::Closed;
             break;
         case TcpState::Established:
-            if (not error)
+            if (ec == std::errc{})
             {
                 send_fin_segment();
                 next_state = TcpState::FinWait1;
@@ -816,8 +885,8 @@ std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
     std::optional<TcpStateTransition> transition = switch_to(next_state);
     if (transition and transition->next == TcpState::Closed)
     {
-        transition->error = error;
-        closed_reason = error;
+        transition->error = ec;
+        closed_reason = ec;
     }
 
     return transition;

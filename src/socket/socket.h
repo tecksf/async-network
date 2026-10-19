@@ -4,9 +4,16 @@
 #include <common/types.h>
 #include <common/ip_address.h>
 #include <coroutine>
+#include <memory>
 #include <system_error>
 
 namespace coro::net {
+
+namespace trans {
+
+class TcpSession;
+
+}
 
 enum class SocketOperation {
     None,
@@ -18,70 +25,63 @@ enum class SocketOperation {
     Close
 };
 
-inline std::error_code to_error_code(int result) noexcept
-{
-    if (result >= 0)
-    {
-        return {};
-    }
-
-    return std::error_code(-result, std::generic_category());
-}
-
-class UserSocketContext {
+class SocketUser {
 public:
-    explicit UserSocketContext(SocketOperation operation)
+    explicit SocketUser(SocketOperation operation)
         : operation(operation)
     {
     }
 
-    [[nodiscard]] int get_result() const noexcept
+    [[nodiscard]] std::errc get_error() const noexcept
     {
-        return result;
+        return error;
     }
 
-    void set_succeed_result(int value) noexcept
+    void set_error(std::errc ec) noexcept
     {
-        result = value;
-    }
-
-    void set_failed_result(std::errc ec) noexcept
-    {
-        result = -std::make_error_code(ec).value();
-    }
-
-    void set_failed_result(const std::error_code& ec) noexcept
-    {
-        result = ec ? -ec.value() : 0;
+        error = ec;
     }
 
 public:
     const SocketOperation operation;
     std::coroutine_handle<> handle = nullptr;
-    int fd = -1;
-    std::span<uint8_t> data;
-    SocketAddress address;
 
 private:
-    int result = 0;
+    std::errc error = std::errc{};
 };
 
 
-class Socket {
+class UdpSocketUser : public SocketUser {
 public:
-    explicit Socket(int fd) : fd(fd) {}
-    virtual ~Socket() = default;
+    explicit UdpSocketUser(SocketOperation operation)
+        : SocketUser(operation)
+    {
+    }
 
-protected:
-    void close(Protocol protocol) noexcept;
-
-    int fd;
+public:
+    SocketAddress local;
+    SocketAddress address;
+    std::span<uint8_t> data;
 };
+
+class TcpSocketUser : public SocketUser {
+public:
+    explicit TcpSocketUser(SocketOperation operation)
+        : SocketUser(operation)
+    {
+    }
+
+public:
+    std::span<uint8_t> data;
+    std::shared_ptr<trans::TcpSession> session;
+};
+
 
 class SocketRegistry {
 public:
-    virtual bool register_user_socket_operation(Protocol protocol, UserSocketContext* ctx) = 0;
-    virtual void emit_close_socket_event(Protocol protocol, int fd) = 0;
+    virtual bool register_udp_socket_operation(UdpSocketUser* user) = 0;
+    virtual bool register_tcp_bind_operation(TcpSocketUser* user, const SocketAddress& local) = 0;
+    virtual bool register_tcp_connect_operation(TcpSocketUser* user, const SocketAddress& remote) = 0;
 };
 
 }

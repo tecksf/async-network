@@ -1,5 +1,4 @@
 #include "tcp_manager.h"
-#include <algorithm>
 #include <cassert>
 #include <async/coro.h>
 #include <protocol/header/tcp.hpp>
@@ -57,8 +56,7 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
         {
             add_new_connection_session(conn_session);
 
-            waiter->address = handle.remote;
-            waiter->set_succeed_result(conn_session->get_socket_fd());
+            waiter->session = conn_session;
             app->notify_user(waiter->handle);
         }
     }
@@ -94,23 +92,14 @@ void TcpManager::release_session(std::shared_ptr<TcpSession> session)
 
         if (session->is_listen_session())
         {
-            auto it = listen_sessions.find(handle.local);
-            if (it != listen_sessions.end() and it->second->get_socket_fd() == fd)
+            if (auto it = listen_sessions.find(handle.local); it != listen_sessions.end() and it->second->get_socket_fd() == fd)
             {
                 listen_sessions.erase(it);
-                sockets.erase(fd);
             }
         }
         else
         {
-            if (auto node = connection_sessions.extract(handle); not node.empty())
-            {
-                sockets.erase(fd);
-            }
-            else
-            {
-                accepted_child = true;
-            }
+            accepted_child = connection_sessions.erase(handle) == 0;
         }
     }
 
@@ -169,14 +158,13 @@ bool TcpManager::check_connect_waiter_result(std::shared_ptr<TcpSession> session
     if (result.kind == TcpSessionResult::Kind::Connected)
     {
         assert(session->is_connected());
-        result.waiter->address = session->get_local_address();
-        result.waiter->set_succeed_result(session->get_socket_fd());
+        result.waiter->session = session;
         return true;
     }
 
     if (result.kind == TcpSessionResult::Kind::Closed)
     {
-        result.waiter->set_failed_result(result.error);
+        result.waiter->set_error(result.error != std::errc{} ? result.error : std::errc::not_connected);
         return true;
     }
 
@@ -197,205 +185,74 @@ bool TcpManager::check_read_waiter_result(std::shared_ptr<TcpSession> session, c
         auto [count, eof] = session->read_into(result.waiter->data);
         if (count > 0)
         {
-            result.waiter->set_succeed_result(static_cast<int>(count));
+            result.waiter->data = result.waiter->data.first(count);
             return true;
         }
 
         if (eof)
         {
-            result.waiter->set_succeed_result(0);
+            result.waiter->data = result.waiter->data.first(0);
             return true;
         }
     }
 
     if (result.kind == TcpSessionResult::Kind::Closed)
     {
-        result.waiter->set_failed_result(result.error);
+        result.waiter->set_error(result.error != std::errc{} ? result.error : std::errc::not_connected);
         return true;
     }
 
     return false;
 }
 
-bool TcpManager::handle_user_socket_operation(UserSocketContext* ctx)
+bool TcpManager::bind_socket(TcpSocketUser* user, const SocketAddress& local)
 {
-    bool done = true;
-
-    do
+    std::unique_lock lock(socket_mutex);
+    auto [it, succeed] = listen_sessions.try_emplace(local, nullptr);
+    if (not succeed)
     {
-        if (ctx->operation == SocketOperation::Bind)
-        {
-            std::unique_lock lock(socket_mutex);
-            auto [it, succeed] = listen_sessions.try_emplace(ctx->address, nullptr);
-            if (succeed)
-            {
-                it->second = std::make_shared<TcpListenSession>(this, ctx->address);
-                const int fd = it->second->get_socket_fd();
-                ctx->set_succeed_result(fd);
-                sockets.emplace(fd, it->second);
-            }
-            else
-            {
-                ctx->set_failed_result(std::errc::address_in_use);
-            }
-        }
-        else if (ctx->operation == SocketOperation::Accept)
-        {
-            auto listen_session = find_listen_session(ctx->address);
-            if (listen_session)
-            {
-                if (listen_session->get_socket_fd() != ctx->fd)
-                {
-                    ctx->set_failed_result(std::errc::bad_file_descriptor);
-                    break;
-                }
-
-                if (auto client_session = listen_session->accept_client())
-                {
-                    ctx->address = client_session->get_remote_address();
-                    ctx->set_succeed_result(client_session->get_socket_fd());
-                    add_new_connection_session(client_session);
-                    break;
-                }
-
-                done = false;
-                listen_session->add_listen_waiter(ctx);
-            }
-        }
-        else if (ctx->operation == SocketOperation::Connect)
-        {
-            uint16_t port = rand_uint<uint16_t>();
-            SocketAddress local = {inet->get_host_ip(), port};
-
-            std::unique_lock lock(socket_mutex);
-            for (uint16_t i = port; i < port + 10000; i++)
-            {
-                local.port = i;
-                TcpSocketHandle handle = {local, ctx->address};
-
-                auto [it, succeed] = connection_sessions.try_emplace(handle, nullptr);
-                if (not succeed)
-                {
-                    continue;
-                }
-
-                auto conn_session = std::make_shared<TcpConnectSession>(this, TcpState::SynSent, handle);
-                sockets.emplace(conn_session->get_socket_fd(), conn_session);
-                it->second = conn_session;
-
-                auto result = conn_session->try_to_add_connect_waiter(ctx);
-                done = check_connect_waiter_result(conn_session, result); // maybe SYN-ACK already arrived before add_waiter
-                break;
-            }
-
-            ctx->set_failed_result(std::errc::address_in_use);
-        }
-        else if (ctx->operation == SocketOperation::Write)
-        {
-            auto session = find_session_by_fd(ctx->fd);
-            if (not session)
-            {
-                ctx->set_failed_result(std::errc::bad_file_descriptor);
-                break;
-            }
-
-            if (not session->is_writable())
-            {
-                ctx->set_failed_result(std::errc::not_connected);
-                break;
-            }
-
-            auto result = session->send_user_data(copy_user_data_to_buffer(ctx->data, session->get_send_mss()));
-            if (result.has_value())
-            {
-                ctx->set_succeed_result(result.value());
-            }
-            else
-            {
-                ctx->set_failed_result(result.error());
-            }
-        }
-        else if (ctx->operation == SocketOperation::Read)
-        {
-            auto session = find_session_by_fd(ctx->fd);
-            if (not session)
-            {
-                ctx->set_failed_result(std::errc::bad_file_descriptor);
-                break;
-            }
-
-            if (not session->is_readable())
-            {
-                ctx->set_failed_result(std::errc::not_connected);
-                break;
-            }
-
-            auto [count, is_eof] = session->read_into(ctx->data);
-            if (count > 0)
-            {
-                ctx->set_succeed_result(static_cast<int>(count));
-                break;
-            }
-
-            if (is_eof)
-            {
-                ctx->set_succeed_result(0);
-                break;
-            }
-
-            auto result = session->try_to_add_read_waiter(ctx);
-            done = check_read_waiter_result(session, result); // maybe PSH/FIN already arrived before add_waiter
-        }
-        else if (ctx->operation == SocketOperation::Close)
-        {
-            if (auto session = find_session_by_fd(ctx->fd))
-            {
-                session->close();
-                ctx->set_succeed_result(0);
-            }
-        }
-    } while (false);
-
-    return done;
-}
-
-std::vector<SocketBuffer> TcpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data, size_t max_tcp_payload) const
-{
-    std::vector<SocketBuffer> outbounds;
-    const size_t max_mtu_payload = static_cast<size_t>(config.mtu) - TcpSegment::HeaderSize;
-    const size_t max_capacity = std::clamp<size_t>(max_tcp_payload, 1, max_mtu_payload);
-
-    std::span<uint8_t> rest = user_data;
-    while (not rest.empty())
-    {
-        const size_t len = std::min(rest.size(), max_capacity);
-        auto outbound = app->allocate_socket_buffer();
-        outbound->allocate(len);
-        std::copy_n(rest.begin(), len, outbound->begin());
-        outbounds.push_back(outbound);
-
-        rest = rest.subspan(len);
+        user->set_error(std::errc::address_in_use);
+        return true;
     }
 
-    return outbounds;
+    it->second = std::make_shared<TcpListenSession>(this, local);
+    user->session = it->second;
+    return true;
+}
+
+bool TcpManager::connect_socket(TcpSocketUser* user, const SocketAddress& remote)
+{
+    const uint16_t port = rand_uint<uint16_t>();
+    SocketAddress local = {inet->get_host_ip(), port};
+
+    std::unique_lock lock(socket_mutex);
+    for (size_t i = 0; i < 10000; i++)
+    {
+        local.port = static_cast<uint16_t>(port + i);
+        TcpSocketHandle handle = {local, remote};
+
+        auto [it, succeed] = connection_sessions.try_emplace(handle, nullptr);
+        if (not succeed)
+        {
+            continue;
+        }
+
+        auto conn_session = std::make_shared<TcpConnectSession>(this, TcpState::SynSent, handle);
+        it->second = conn_session;
+
+        // The SYN-ACK may already have arrived before the waiter was added.
+        auto result = conn_session->try_to_add_connect_waiter(user);
+        return check_connect_waiter_result(conn_session, result);
+    }
+
+    user->set_error(std::errc::address_in_use);
+    return true;
 }
 
 void TcpManager::add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session)
 {
     std::unique_lock lock(socket_mutex);
     connection_sessions.emplace(session->get_socket_handle(), session);
-    sockets.emplace(session->get_socket_fd(), session);
-}
-
-std::shared_ptr<TcpSession> TcpManager::find_session_by_fd(int fd) const
-{
-    std::shared_lock lock(socket_mutex);
-    if (auto it = sockets.find(fd); it != sockets.end())
-    {
-        return it->second;
-    }
-
-    return nullptr;
 }
 
 std::shared_ptr<TcpConnectSession> TcpManager::find_connection_session(const TcpSocketHandle& handle) const

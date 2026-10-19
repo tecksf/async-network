@@ -1,4 +1,5 @@
 #include "tcp_session.h"
+#include "tcp_manager.h"
 #include <algorithm>
 #include <cassert>
 #include <common/encoding.h>
@@ -114,17 +115,10 @@ void TcpConnectSession::restore_syn_cookie_state(std::uint32_t server_isn, std::
     logger->debug("===> TCP session [{0}] recovered from SYN cookie, MSS: {1}", session_id, get_send_mss());
 }
 
-UserSocketContext* TcpConnectSession::take_waiter()
-{
-    auto w = waiter;
-    waiter = nullptr;
-    return w;
-}
-
-TcpSessionResult TcpConnectSession::try_to_add_connect_waiter(UserSocketContext* ctx)
+TcpSessionResult TcpConnectSession::try_to_add_connect_waiter(TcpSocketUser* user)
 {
     TcpSessionResult result;
-    if (ctx == nullptr)
+    if (user == nullptr)
     {
         return result;
     }
@@ -132,37 +126,14 @@ TcpSessionResult TcpConnectSession::try_to_add_connect_waiter(UserSocketContext*
     std::lock_guard lock(session_mutex);
     TcpStateTransition transition = {state, state};
     result = fill_session_result(transition);
-    if (result.is_nothing_to_do())
+    if (result.kind == TcpSessionResult::Kind::None)
     {
-        this->waiter = ctx;
+        this->waiter = user;
     }
     else
     {
-        result.waiter = ctx;
+        result.waiter = user;
     }
-    return result;
-}
-
-TcpSessionResult TcpConnectSession::try_to_add_read_waiter(UserSocketContext* ctx)
-{
-    TcpSessionResult result;
-    if (ctx == nullptr)
-    {
-        return result;
-    }
-
-    std::lock_guard lock(session_mutex);
-
-    result = fill_session_result(std::nullopt);
-    if (result.is_nothing_to_do())
-    {
-        this->waiter = ctx;
-    }
-    else
-    {
-        result.waiter = ctx;
-    }
-
     return result;
 }
 
@@ -199,18 +170,27 @@ std::shared_ptr<TcpConnectSession> TcpListenSession::create_accept_session(const
 
 std::shared_ptr<TcpConnectSession> TcpListenSession::accept_client()
 {
-    std::lock_guard lock(accept_mutex);
-    for (auto iter = accept_queue.begin(); iter != accept_queue.end(); ++iter)
+    std::shared_ptr<TcpConnectSession> session;
+    //
     {
-        if (iter->second.session and iter->second.session->is_connected())
+        std::lock_guard lock(accept_mutex);
+        for (auto iter = accept_queue.begin(); iter != accept_queue.end(); ++iter)
         {
-            auto session = iter->second.session;
-            accept_queue.erase(iter);
-            return session;
+            if (iter->second.session and iter->second.session->is_connected())
+            {
+                session = iter->second.session;
+                accept_queue.erase(iter);
+                break;
+            }
         }
     }
 
-    return nullptr;
+    if (session)
+    {
+        manager->add_new_connection_session(session);
+    }
+
+    return session;
 }
 
 void TcpListenSession::remove_accept_session(const SocketAddress& client)
@@ -219,15 +199,15 @@ void TcpListenSession::remove_accept_session(const SocketAddress& client)
     accept_queue.erase(client);
 }
 
-void TcpListenSession::add_listen_waiter(UserSocketContext* ctx)
+void TcpListenSession::add_listen_waiter(TcpSocketUser* user)
 {
-    if (ctx == nullptr)
+    if (user == nullptr)
     {
         return;
     }
 
     std::lock_guard lock(accept_mutex);
-    accept_waiters.push_back(ctx);
+    accept_waiters.push_back(user);
 }
 
 std::uint64_t TcpListenSession::current_cookie_timeslot() const
@@ -428,7 +408,7 @@ void TcpListenSession::process_syn_cookie(const TcpSegment& header, const Socket
     send_syn_ack_without_retransmission(outbound, client, cookie_seq, client_isn);
 }
 
-std::pair<std::shared_ptr<TcpConnectSession>, UserSocketContext*>
+std::pair<std::shared_ptr<TcpConnectSession>, TcpSocketUser*>
 TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client)
 {
     // lazy cleanup: scan at most once per second instead of walking the accept queue for every segment
@@ -514,7 +494,7 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
     // the sequence numbers were preloaded from the cookie, so the state machine must reach Established
     assert(session->is_connected());
 
-    UserSocketContext* waiter = nullptr;
+    TcpSocketUser* waiter = nullptr;
     bool admitted = true;
     std::vector<std::shared_ptr<TcpConnectSession>> evicted;
     //

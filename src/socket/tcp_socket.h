@@ -1,7 +1,6 @@
 #ifndef ASYNC_NETWORK_TCP_SOCKET_H
 #define ASYNC_NETWORK_TCP_SOCKET_H
 
-#include <atomic>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -12,62 +11,26 @@
 
 namespace coro::net {
 
-class TcpReadStream;
-class TcpWriteStream;
-
-namespace detail {
-
-class TcpStreamState {
-public:
-    TcpStreamState(int fd, const SocketAddress& local, const SocketAddress& remote);
-    ~TcpStreamState() = default;
-
-    TcpStreamState(const TcpStreamState&) = delete;
-    TcpStreamState& operator=(const TcpStreamState&) = delete;
-    TcpStreamState(TcpStreamState&&) = delete;
-    TcpStreamState& operator=(TcpStreamState&&) = delete;
-
-    [[nodiscard]] int get_read_fd() const noexcept;
-    [[nodiscard]] int get_write_fd() const noexcept;
-
-    CloseAwaiter close_read();
-    CloseAwaiter close_write();
-
-    void release_read() noexcept;
-    void release_write() noexcept;
-
-    const SocketAddress local;
-    const SocketAddress remote;
-
-private:
-    void release_if_closed() noexcept;
-
-    std::atomic<int> fd;
-    std::atomic<bool> read_closed{false};
-    std::atomic<bool> write_closed{false};
-};
-
+namespace trans {
+class TcpSession;
 }
-
 
 class TcpReadStream {
 public:
-    ~TcpReadStream();
     TcpReadStream(const TcpReadStream&) = delete;
     TcpReadStream& operator=(const TcpReadStream&) = delete;
     TcpReadStream(TcpReadStream&& other) noexcept = default;
     TcpReadStream& operator=(TcpReadStream&& other) noexcept;
 
     TcpReadAwaiter read(std::span<uint8_t> data) const;
-    CloseAwaiter close() const;
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
 
 private:
     friend class TcpSocket;
-    explicit TcpReadStream(std::shared_ptr<detail::TcpStreamState> state);
+    explicit TcpReadStream(std::shared_ptr<trans::TcpSession> session);
 
-    std::shared_ptr<detail::TcpStreamState> state;
+    std::shared_ptr<trans::TcpSession> session;
 };
 
 
@@ -82,22 +45,23 @@ public:
     TcpWriteAwaiter write(std::span<uint8_t> data) const;
     TcpWriteAwaiter write(std::string_view data) const;
 
-    CloseAwaiter close() const;
+    void close();
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
 
 private:
     friend class TcpSocket;
-    explicit TcpWriteStream(std::shared_ptr<detail::TcpStreamState> state);
+    explicit TcpWriteStream(std::shared_ptr<trans::TcpSession> session);
 
-    std::shared_ptr<detail::TcpStreamState> state;
+    std::shared_ptr<trans::TcpSession> session;
+    bool closed = false;
 };
 
-class TcpSocket : public Socket {
+class TcpSocket {
 public:
     friend class TcpAcceptAwaiter;
     friend class TcpConnectAwaiter;
-    ~TcpSocket() override;
+    ~TcpSocket();
     TcpSocket(const TcpSocket&) = delete;
     TcpSocket& operator=(const TcpSocket&) = delete;
     TcpSocket(TcpSocket&& other) noexcept;
@@ -114,8 +78,9 @@ public:
     std::pair<TcpReadStream, TcpWriteStream> split() &&;
 
 private:
-    explicit TcpSocket(int fd, const SocketAddress& local, const SocketAddress& remote);
+    explicit TcpSocket(std::shared_ptr<trans::TcpSession> session);
 
+    std::shared_ptr<trans::TcpSession> session;
     const SocketAddress local;
     const SocketAddress remote;
 };

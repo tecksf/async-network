@@ -76,14 +76,14 @@ struct TcpSessionResult {
     }
 
     Kind kind = Kind::None;
-    UserSocketContext* waiter = nullptr;
-    std::error_code error;
+    TcpSocketUser* waiter = nullptr;
+    std::errc error = std::errc{};
 };
 
 struct TcpStateTransition {
     TcpState prev;
     TcpState next;
-    std::error_code error;
+    std::errc error = std::errc{};
 };
 
 class TcpSessionEvent {
@@ -115,8 +115,9 @@ public:
 
     [[nodiscard]] TcpSessionResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
     std::optional<TcpStateTransition> close(std::errc ec = std::errc{});
+    std::expected<int, std::errc> send_user_data(std::span<uint8_t> user_data);
     std::expected<int, std::errc> send_user_data(const std::vector<SocketBuffer>& payloads);
-    virtual TcpSessionResult try_to_add_read_waiter(UserSocketContext* ctx) { return {}; }
+    TcpSessionResult try_to_add_read_waiter(TcpSocketUser* ctx);
 
 protected:
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> switch_to(TcpState next_state);
@@ -138,7 +139,7 @@ protected:
     void update_peer_mss(const TcpSegment& header);
     static co_async<> time_wait_timer(std::shared_ptr<TcpSession> session, std::shared_ptr<std::atomic_bool> token);
     void on_retransmission_failed() override;
-    virtual UserSocketContext* take_waiter() { return nullptr; }
+    TCP_LOCK_REQUIRED TcpSocketUser* take_waiter();
 
 protected:
     TcpState process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload);
@@ -181,7 +182,8 @@ protected:
     std::shared_ptr<std::atomic<bool>> persist_cancelled = nullptr;
     TcpSendWindow send_window;
     TcpReceiveWindow receive_window;
-    std::error_code closed_reason;
+    std::errc closed_reason = std::errc{};
+    TcpSocketUser* waiter = nullptr;
 };
 
 class TcpConnectSession : public TcpSession {
@@ -190,14 +192,7 @@ public:
     ~TcpConnectSession() override = default;
 
     void restore_syn_cookie_state(std::uint32_t server_isn, std::uint32_t client_isn, std::uint16_t peer_mss);
-    TcpSessionResult try_to_add_connect_waiter(UserSocketContext* ctx);
-    TcpSessionResult try_to_add_read_waiter(UserSocketContext* ctx) override;
-
-protected:
-    UserSocketContext* take_waiter() override;
-
-private:
-    UserSocketContext* waiter = nullptr;
+    TcpSessionResult try_to_add_connect_waiter(TcpSocketUser* user);
 };
 
 class TcpListenSession : public TcpSession {
@@ -208,10 +203,10 @@ public:
     std::shared_ptr<TcpConnectSession> create_accept_session(const SocketAddress& client, TcpState s = TcpState::SynReceived);
     std::shared_ptr<TcpConnectSession> accept_client();
     void remove_accept_session(const SocketAddress& client);
-    void add_listen_waiter(UserSocketContext* ctx);
+    void add_listen_waiter(TcpSocketUser* user);
     constexpr bool is_listen_session() const override { return true; }
 
-    std::pair<std::shared_ptr<TcpConnectSession>, UserSocketContext*>
+    std::pair<std::shared_ptr<TcpConnectSession>, TcpSocketUser*>
     process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client);
 
 private:
@@ -244,7 +239,7 @@ private:
 
     std::mutex accept_mutex;
     AcceptQueue accept_queue;
-    std::deque<UserSocketContext*> accept_waiters;
+    std::deque<TcpSocketUser*> accept_waiters;
 
     std::size_t dropped_since_log = 0;
     std::size_t dropped_total = 0;

@@ -1,5 +1,6 @@
 #include "tcp_listener.h"
 #include <async/runtime.h>
+#include <protocol/manager/transport/tcp_session.h>
 
 namespace coro::net {
 
@@ -19,49 +20,54 @@ TcpBindAwaiter TcpListener::bind(std::string_view addr)
     return TcpBindAwaiter(std::errc::address_not_available);
 }
 
-TcpListener::TcpListener(int fd, const SocketAddress& address)
-    : Socket(fd)
-      , local(address)
+TcpListener::TcpListener(std::shared_ptr<trans::TcpListenSession> session)
+    : session(std::move(session))
 {
 }
 
 TcpListener::~TcpListener()
 {
-    Socket::close(Protocol::TCP);
+    if (session)
+    {
+        session->close();
+        session.reset();
+    }
 }
 
 TcpListener::TcpListener(TcpListener&& other) noexcept
-    : Socket(other.fd)
+    : session(std::move(other.session))
 {
-    local = other.local;
-    other.fd = -1;
-    other.local = SocketAddress();
 }
 
 TcpListener& TcpListener::operator=(TcpListener&& other) noexcept
 {
     if (this != &other)
     {
-        Socket::close(Protocol::TCP);
-        fd = other.fd;
-        local = other.local;
-        other.fd = -1;
+        this->~TcpListener();
+        new(this) TcpListener(std::move(other));
     }
     return *this;
 }
 
 TcpAcceptAwaiter TcpListener::accept() const
 {
-    auto network = Runtime::current()->current_network();
-    return TcpAcceptAwaiter(network, fd, local);
+    if (not session)
+    {
+        return TcpAcceptAwaiter(std::errc::bad_file_descriptor);
+    }
+
+    return TcpAcceptAwaiter(session);
 }
 
 CloseAwaiter TcpListener::close()
 {
-    auto network = Runtime::current()->current_network();
-    auto awaiter = CloseAwaiter(network, fd, Protocol::TCP);
-    fd = -1;
-    return awaiter;
+    if (session)
+    {
+        session->close();
+        session.reset();
+    }
+
+    return CloseAwaiter();
 }
 
 }

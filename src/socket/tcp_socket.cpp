@@ -1,112 +1,21 @@
 #include "tcp_socket.h"
 #include <async/runtime.h>
 #include <new>
+#include <protocol/manager/transport/tcp_session.h>
 #include <utility>
 
 namespace coro::net {
 
-namespace detail {
-
-TcpStreamState::TcpStreamState(int fd, const SocketAddress& local, const SocketAddress& remote)
-    : local(local)
-      , remote(remote)
-      , fd(fd)
+TcpReadStream::TcpReadStream(std::shared_ptr<trans::TcpSession> session)
+    : session(std::move(session))
 {
-}
-
-int TcpStreamState::get_read_fd() const noexcept
-{
-    if (read_closed.load(std::memory_order_acquire))
-    {
-        return -1;
-    }
-
-    return fd.load(std::memory_order_acquire);
-}
-
-int TcpStreamState::get_write_fd() const noexcept
-{
-    if (write_closed.load(std::memory_order_acquire))
-    {
-        return -1;
-    }
-
-    return fd.load(std::memory_order_acquire);
-}
-
-CloseAwaiter TcpStreamState::close_read()
-{
-    release_read();
-    return CloseAwaiter(nullptr, -1, Protocol::TCP);
-}
-
-CloseAwaiter TcpStreamState::close_write()
-{
-    release_write();
-    return CloseAwaiter(nullptr, -1, Protocol::TCP);
-}
-
-void TcpStreamState::release_read() noexcept
-{
-    if (read_closed.exchange(true, std::memory_order_acq_rel))
-    {
-        return;
-    }
-
-    release_if_closed();
-}
-
-void TcpStreamState::release_write() noexcept
-{
-    if (write_closed.exchange(true, std::memory_order_acq_rel))
-    {
-        return;
-    }
-
-    const int owned_fd = fd.load(std::memory_order_acquire);
-    if (owned_fd >= 0)
-    {
-        auto network = Runtime::current()->current_network();
-        network->emit_close_socket_event(Protocol::TCP, owned_fd);
-    }
-
-    release_if_closed();
-}
-
-void TcpStreamState::release_if_closed() noexcept
-{
-    if (not read_closed.load(std::memory_order_acquire) or not write_closed.load(std::memory_order_acquire))
-    {
-        return;
-    }
-
-    fd.store(-1, std::memory_order_release);
-}
-
-}
-
-TcpReadStream::TcpReadStream(std::shared_ptr<detail::TcpStreamState> state)
-    : state(std::move(state))
-{
-}
-
-TcpReadStream::~TcpReadStream()
-{
-    if (state)
-    {
-        state->release_read();
-    }
 }
 
 TcpReadStream& TcpReadStream::operator=(TcpReadStream&& other) noexcept
 {
     if (this != &other)
     {
-        if (state)
-        {
-            state->release_read();
-        }
-        state = std::move(other.state);
+        session = std::move(other.session);
     }
 
     return *this;
@@ -114,58 +23,41 @@ TcpReadStream& TcpReadStream::operator=(TcpReadStream&& other) noexcept
 
 TcpReadAwaiter TcpReadStream::read(std::span<uint8_t> data) const
 {
-    const int owned_fd = state ? state->get_read_fd() : -1;
-    if (owned_fd < 0)
+    if (not session)
     {
         return TcpReadAwaiter(std::errc::not_connected);
     }
 
-    auto network = Runtime::current()->current_network();
-    return TcpReadAwaiter(network, owned_fd, data);
-}
-
-CloseAwaiter TcpReadStream::close() const
-{
-    if (not state)
-    {
-        return CloseAwaiter(nullptr, -1, Protocol::TCP);
-    }
-
-    return state->close_read();
+    return TcpReadAwaiter(session, data);
 }
 
 SocketAddress TcpReadStream::get_local_address() const
 {
-    return state->local;
+    return session ? session->get_local_address() : SocketAddress{};
 }
 
 SocketAddress TcpReadStream::get_remote_address() const
 {
-    return state->remote;
+    return session ? session->get_remote_address() : SocketAddress{};
 }
 
-TcpWriteStream::TcpWriteStream(std::shared_ptr<detail::TcpStreamState> state)
-    : state(std::move(state))
+TcpWriteStream::TcpWriteStream(std::shared_ptr<trans::TcpSession> session)
+    : session(std::move(session))
 {
 }
 
 TcpWriteStream::~TcpWriteStream()
 {
-    if (state)
-    {
-        state->release_write();
-    }
+    close();
 }
 
 TcpWriteStream& TcpWriteStream::operator=(TcpWriteStream&& other) noexcept
 {
     if (this != &other)
     {
-        if (state)
-        {
-            state->release_write();
-        }
-        state = std::move(other.state);
+        close();
+        session = std::move(other.session);
+        closed = other.closed;
     }
 
     return *this;
@@ -173,14 +65,12 @@ TcpWriteStream& TcpWriteStream::operator=(TcpWriteStream&& other) noexcept
 
 TcpWriteAwaiter TcpWriteStream::write(std::span<uint8_t> data) const
 {
-    const int owned_fd = state ? state->get_write_fd() : -1;
-    if (owned_fd < 0)
+    if (not session or closed)
     {
         return TcpWriteAwaiter(std::errc::not_connected);
     }
 
-    auto network = Runtime::current()->current_network();
-    return TcpWriteAwaiter(network, owned_fd, data);
+    return TcpWriteAwaiter(session, data);
 }
 
 TcpWriteAwaiter TcpWriteStream::write(std::string_view data) const
@@ -188,40 +78,38 @@ TcpWriteAwaiter TcpWriteStream::write(std::string_view data) const
     return write(std::span((uint8_t*) data.data(), data.size()));
 }
 
-CloseAwaiter TcpWriteStream::close() const
+void TcpWriteStream::close()
 {
-    if (not state)
+    if (not closed && session)
     {
-        return CloseAwaiter(nullptr, -1, Protocol::TCP);
+        closed = true;
+        session->close();
     }
-
-    return state->close_write();
 }
 
 SocketAddress TcpWriteStream::get_local_address() const
 {
-    return state->local;
+    return session ? session->get_local_address() : SocketAddress{};
 }
 
 SocketAddress TcpWriteStream::get_remote_address() const
 {
-    return state->remote;
+    return session ? session->get_remote_address() : SocketAddress{};
 }
 
-TcpSocket::TcpSocket(int fd, const SocketAddress& local, const SocketAddress& remote)
-    : Socket(fd)
-      , local(local)
-      , remote(remote)
+TcpSocket::TcpSocket(std::shared_ptr<trans::TcpSession> owned_session)
+    : session(std::move(owned_session))
+      , local(session->get_local_address())
+      , remote(session->get_remote_address())
 {
 }
 
 
 TcpSocket::TcpSocket(TcpSocket&& other) noexcept
-    : Socket(other.fd)
+    : session(std::move(other.session))
       , local(other.local)
       , remote(other.remote)
 {
-    other.fd = -1;
 }
 
 TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept
@@ -236,7 +124,11 @@ TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept
 
 TcpSocket::~TcpSocket()
 {
-    Socket::close(Protocol::TCP);
+    if (session)
+    {
+        session->close();
+        session.reset();
+    }
 }
 
 SocketAddress TcpSocket::get_local_address() const
@@ -251,8 +143,12 @@ SocketAddress TcpSocket::get_remote_address() const
 
 TcpWriteAwaiter TcpSocket::write(std::span<uint8_t> data) const
 {
-    auto network = Runtime::current()->current_network();
-    return TcpWriteAwaiter(network, fd, data);
+    if (not session)
+    {
+        return TcpWriteAwaiter(std::errc::not_connected);
+    }
+
+    return TcpWriteAwaiter(session, data);
 }
 
 TcpWriteAwaiter TcpSocket::write(std::string_view data) const
@@ -278,24 +174,29 @@ TcpConnectAwaiter TcpSocket::connect(std::string_view addr)
 
 TcpReadAwaiter TcpSocket::read(std::span<uint8_t> data) const
 {
-    auto network = Runtime::current()->current_network();
-    return TcpReadAwaiter(network, fd, data);
+    if (not session)
+    {
+        return TcpReadAwaiter(std::errc::not_connected);
+    }
+
+    return TcpReadAwaiter(session, data);
 }
 
 CloseAwaiter TcpSocket::close()
 {
-    auto network = Runtime::current()->current_network();
-    auto awaiter = CloseAwaiter(network, fd, Protocol::TCP);
-    fd = -1;
-    return awaiter;
+    if (session)
+    {
+        session->close();
+        session.reset();
+    }
+
+    return CloseAwaiter();
 }
 
 std::pair<TcpReadStream, TcpWriteStream> TcpSocket::split() &&
 {
-    auto state = std::make_shared<detail::TcpStreamState>(fd, local, remote);
-    fd = -1;
-
-    return {TcpReadStream(state), TcpWriteStream(std::move(state))};
+    auto owned = std::exchange(session, nullptr);
+    return {TcpReadStream(owned), TcpWriteStream(std::move(owned))};
 }
 
 }

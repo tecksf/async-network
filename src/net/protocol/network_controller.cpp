@@ -244,25 +244,19 @@ void NetworkController::set_host_mac(const MacAddress& mac)
     host_mac = mac;
 }
 
-bool NetworkController::register_user_socket_operation(Protocol protocol, UserSocketContext* ctx)
+bool NetworkController::register_udp_socket_operation(UdpSocketUser* user)
 {
-    if (protocol == Protocol::TCP)
-    {
-        return tcp_manager->handle_user_socket_operation(ctx);
-    }
-    else if (protocol == Protocol::UDP)
-    {
-        return udp_manager->handle_user_socket_operation(ctx);
-    }
-
-    return false;
+    return udp_manager->handle_user_socket_operation(user);
 }
 
-void NetworkController::emit_close_socket_event(Protocol protocol, int fd)
+bool NetworkController::register_tcp_bind_operation(TcpSocketUser* user, const SocketAddress& local)
 {
-    UserSocketContext context(SocketOperation::Close);
-    context.fd = fd;
-    register_user_socket_operation(protocol, &context);
+    return tcp_manager->bind_socket(user, local);
+}
+
+bool NetworkController::register_tcp_connect_operation(TcpSocketUser* user, const SocketAddress& remote)
+{
+    return tcp_manager->connect_socket(user, remote);
 }
 
 std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
@@ -287,13 +281,13 @@ std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
         // }
 
         // n contains the 14 byte ethernet header, ethernet_mtu only the payload.
-        if (n > config.link.ethernet_mtu + ETHERNET_HEADER_SIZE)
-        {
-            logger->warn("ethernet frame exceeds mtu: frame={} bytes, payload={} bytes, mtu={} bytes",
-                         n, n - ETHERNET_HEADER_SIZE, config.link.ethernet_mtu);
-            recycle(block);
-            return nullptr;
-        }
+        // if (n > config.link.ethernet_mtu + ETHERNET_HEADER_SIZE)
+        // {
+        //     logger->warn("ethernet frame exceeds mtu: frame={} bytes, payload={} bytes, mtu={} bytes",
+        //                  n, n - ETHERNET_HEADER_SIZE, config.link.ethernet_mtu);
+        //     recycle(block);
+        //     return nullptr;
+        // }
 
         SocketBuffer inbound(
             std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), config.block_size, n, recycle)

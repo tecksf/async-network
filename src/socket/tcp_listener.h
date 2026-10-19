@@ -4,15 +4,22 @@
 #include "socket.h"
 #include "socket_awaiter.h"
 #include <common/ip_address.h>
+#include <memory>
 
 namespace coro::net {
 
-class TcpListener : public Socket {
+namespace trans {
+
+class TcpListenSession;
+
+}
+
+class TcpListener {
 public:
     friend class TcpBindAwaiter;
     static TcpBindAwaiter bind(const IpAddress& ip, uint16_t port);
     static TcpBindAwaiter bind(std::string_view addr);
-    ~TcpListener() override;
+    ~TcpListener();
     TcpListener(const TcpListener&) = delete;
     TcpListener& operator=(const TcpListener&) = delete;
     TcpListener(TcpListener&& other) noexcept;
@@ -21,9 +28,9 @@ public:
     CloseAwaiter close();
 
 private:
-    explicit TcpListener(int fd, const SocketAddress& address);
+    explicit TcpListener(std::shared_ptr<trans::TcpListenSession> session);
 
-    SocketAddress local;
+    std::shared_ptr<trans::TcpListenSession> session;
 };
 
 }

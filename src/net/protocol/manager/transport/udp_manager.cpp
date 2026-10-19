@@ -86,85 +86,61 @@ co_async<> UdpManager::async_send_udp_segment(std::vector<SocketBuffer> outbound
     co_await inet->async_send_ipv4_packet(outbounds, context);
 }
 
-bool UdpManager::handle_user_socket_operation(UserSocketContext* ctx)
+bool UdpManager::handle_user_socket_operation(UdpSocketUser* user)
 {
     bool done = true;
     std::lock_guard<std::mutex> lock(socket_mutex);
 
-    if (ctx->operation == SocketOperation::Bind)
+    if (user->operation == SocketOperation::Bind)
     {
-        UdpSocketHandle handle = ctx->address;
-        auto [listener, succeed] = socket_queue.try_emplace(handle, std::make_shared<SocketQueueEntry>());
-        if (succeed)
+        auto [it, succeed] = sockets.try_emplace(user->local, std::make_shared<SocketQueueEntry>());
+        if (not succeed)
         {
-            auto entry = listener->second;
+            user->set_error(std::errc::address_in_use);
+        }
 
-            const int fd = app->allocate_fd();
-            ctx->set_succeed_result(fd);
-            entry->local_port = handle.port;
-            sockets.emplace(fd, entry);
-        }
-        else
-        {
-            ctx->set_failed_result(std::errc::address_in_use);
-        }
+        return done;
     }
-    else if (ctx->operation == SocketOperation::Read)
+
+    auto it = sockets.find(user->local);
+    if (it == sockets.end())
     {
-        auto it = sockets.find(ctx->fd);
-        if (it == sockets.end())
-        {
-            ctx->set_failed_result(std::errc::bad_file_descriptor);
-        }
-        else if (auto entry = it->second; not entry->user_data.empty())
+        user->set_error(std::errc::not_connected);
+        return done;
+    }
+
+    auto entry = it->second;
+    if (user->operation == SocketOperation::Read)
+    {
+        if (not entry->user_data.empty())
         {
             auto buffer_data = entry->user_data.front();
             entry->user_data.pop_front();
 
-            const int len = std::min(buffer_data.inbound->size(), ctx->data.size());
-            std::copy_n(buffer_data.inbound->begin(), len, ctx->data.begin());
-            ctx->set_succeed_result(len);
-            ctx->address = buffer_data.address;
+            const size_t len = std::min(buffer_data.inbound->size(), user->data.size());
+            std::copy_n(buffer_data.inbound->begin(), len, user->data.begin());
+            user->data = user->data.first(len);
+            user->address = buffer_data.address;
         }
         else
         {
-            entry->waiters.push_back(ctx);
+            entry->waiters.push_back(user);
             done = false;
         }
     }
-    else if (ctx->operation == SocketOperation::Write)
+    else if (user->operation == SocketOperation::Write)
     {
-        auto it = sockets.find(ctx->fd);
-        if (it == sockets.end())
-        {
-            ctx->set_failed_result(std::errc::bad_file_descriptor);
-        }
-        else if (auto entry = it->second)
-        {
-            std::vector<SocketBuffer> outbounds = copy_user_data_to_buffer(ctx->data);
-            trans::UdpContext context;
-            context.source_port = entry->local_port;
-            context.ip = ctx->address.ip;
-            context.destination_port = ctx->address.port;
+        std::vector<SocketBuffer> outbounds = copy_user_data_to_buffer(user->data);
+        trans::UdpContext context;
+        context.source_port = user->local.port;
+        context.ip = user->address.ip;
+        context.destination_port = user->address.port;
 
-            ctx->set_succeed_result(static_cast<int>(ctx->data.size()));
-
-            app->sumit_task(async_send_udp_segment(outbounds, context));
-        }
+        app->sumit_task(async_send_udp_segment(outbounds, context));
     }
-    else if (ctx->operation == SocketOperation::Close)
+    else if (user->operation == SocketOperation::Close)
     {
-        auto it = sockets.find(ctx->fd);
-        if (it != sockets.end())
-        {
-            sockets.erase(it);
-            socket_queue.erase(UdpSocketHandle(inet->get_host_ip(), it->second->local_port));
-            ctx->set_succeed_result(0);
-        }
-        else
-        {
-            ctx->set_failed_result(std::errc::bad_file_descriptor);
-        }
+        sockets.erase(it);
     }
 
     return done;
@@ -173,8 +149,8 @@ bool UdpManager::handle_user_socket_operation(UserSocketContext* ctx)
 void UdpManager::handle_udp_data_from_network(const UdpSocketHandle& handle, const SocketAddress& client, const SocketBuffer& inbound)
 {
     std::lock_guard<std::mutex> lock(socket_mutex);
-    auto it = socket_queue.find(handle);
-    if (it == socket_queue.end())
+    auto it = sockets.find(handle);
+    if (it == sockets.end())
     {
         return;
     }
@@ -185,9 +161,9 @@ void UdpManager::handle_udp_data_from_network(const UdpSocketHandle& handle, con
         auto waiter = entry->waiters.front();
         entry->waiters.pop_front();
 
-        const int len = std::min(inbound->size(), waiter->data.size());
+        const size_t len = std::min(inbound->size(), waiter->data.size());
         std::copy_n(inbound->cbegin(), len, waiter->data.begin());
-        waiter->set_succeed_result(len);
+        waiter->data = waiter->data.first(len);
         waiter->address = client;
 
         app->notify_user(waiter->handle);

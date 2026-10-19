@@ -29,18 +29,18 @@ public:
     app::ApplicationService* get_app() const;
     trans::TransportService* get_trans() const;
     const TcpConfig& get_config() const;
-    bool handle_user_socket_operation(UserSocketContext* ctx);
+
+    bool bind_socket(TcpSocketUser* user, const SocketAddress& local);
+    bool connect_socket(TcpSocketUser* user, const SocketAddress& remote);
+    void add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session);
 
 private:
-    std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data, size_t max_tcp_payload) const;
-    void add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session);
     void release_session(std::shared_ptr<TcpSession> session);
     co_async<> async_release_session(std::shared_ptr<TcpSession> session);
     void dispatch_session_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
     static bool check_connect_waiter_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
     static bool check_read_waiter_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
 
-    std::shared_ptr<TcpSession> find_session_by_fd(int fd) const;
     std::shared_ptr<TcpConnectSession> find_connection_session(const TcpSocketHandle& handle) const;
     std::shared_ptr<TcpListenSession> find_listen_session(const SocketAddress& local) const;
 
@@ -52,7 +52,6 @@ private:
     const TcpConfig config;
 
     mutable std::shared_mutex socket_mutex;
-    std::map<int, std::shared_ptr<TcpSession>> sockets;
     std::map<TcpSocketHandle, std::shared_ptr<TcpConnectSession>> connection_sessions;
     std::map<SocketAddress, std::shared_ptr<TcpListenSession>> listen_sessions;
 };
