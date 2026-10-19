@@ -10,8 +10,6 @@
 #include <cerrno>
 #include <cstring>
 #include <string>
-#include <string_view>
-#include <utility>
 #include <vector>
 
 #ifndef PACKET_FANOUT_FLAG_IGNORE_OUTGOING
@@ -41,37 +39,6 @@ static void notify_waiters(const std::vector<std::coroutine_handle<>>& waiters)
     {
         local_polling->spawn_local(w);
     }
-}
-
-static std::string_view trim_view(std::string_view text)
-{
-    const auto first = text.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos)
-    {
-        return {};
-    }
-
-    const auto last = text.find_last_not_of(" \t\r\n");
-    return text.substr(first, last - first + 1);
-}
-
-static std::vector<std::string_view> split_options(std::string_view text)
-{
-    std::vector<std::string_view> items;
-    size_t offset = 0;
-    while (offset <= text.size())
-    {
-        const auto comma = text.find(',', offset);
-        const auto end = comma == std::string_view::npos ? text.size() : comma;
-        items.push_back(text.substr(offset, end - offset));
-        if (comma == std::string_view::npos)
-        {
-            break;
-        }
-        offset = comma + 1;
-    }
-
-    return items;
 }
 
 static bool get_mac_by_ifname(const std::string& ifname, uint8_t mac[6])
@@ -112,81 +79,10 @@ void NetworkController::create_managers()
     tcp_manager = std::make_unique<trans::TcpManager>(this, this, this, logger, config.tcp);
 }
 
-bool NetworkController::load_config(const std::vector<std::string>& options)
+bool NetworkController::apply_config(const NetConfig& new_config)
 {
-    std::string path = NetConfig::DefaultPath;
-    bool path_given = false;
-    std::vector<std::pair<std::string, std::string>> overrides;
-
-    for (const auto& option: options)
-    {
-        for (const auto& item: split_options(option))
-        {
-            const std::string_view text = trim_view(item);
-            if (text.empty())
-            {
-                continue;
-            }
-
-            const auto separator = text.find('=');
-            if (separator == std::string_view::npos)
-            {
-                logger->error("[config] '{}' is not in name=value form", std::string(text));
-                return false;
-            }
-
-            const std::string_view key = trim_view(text.substr(0, separator));
-            const std::string_view value = trim_view(text.substr(separator + 1));
-            if (key == "config" or key == "file")
-            {
-                path = std::string(value);
-                path_given = true;
-            }
-            else
-            {
-                overrides.emplace_back(std::string(key), std::string(value));
-            }
-        }
-    }
-
-    NetConfig parsed;
-    std::vector<std::string> errors;
-    if (parsed.load_file(path, &errors))
-    {
-        logger->info("[config] loaded from {}", path);
-    }
-    else if (path_given)
-    {
-        logger->error("[config] can not open {}", path);
-        return false;
-    }
-    else
-    {
-        logger->warn("[config] {} not found, using built-in defaults", path);
-    }
-
-    // Malformed lines of the file only disable the affected key, a bad command line
-    // override is treated as a usage error.
-    for (const auto& error: errors)
-    {
-        logger->error("[config] {}", error);
-    }
-
-    for (const auto& [key, value]: overrides)
-    {
-        std::vector<std::string> override_errors;
-        if (not parsed.apply(key, value, &override_errors))
-        {
-            for (const auto& error: override_errors)
-            {
-                logger->error("[config] {}", error);
-            }
-            return false;
-        }
-    }
-
-    parsed.normalize();
-    config = std::move(parsed);
+    config = new_config;
+    config.normalize();
 
     set_interface_name(config.interface_name);
     if (auto address = IpAddress::from(config.host_ip))
@@ -201,9 +97,9 @@ bool NetworkController::load_config(const std::vector<std::string>& options)
 
     create_managers();
 
-    logger->info("[config] interface={}, ip={}, block_size={}, ethernet_mtu={}, tcp_window={}, tcp_mss={}",
-                 config.interface_name, config.host_ip, config.block_size, config.link.ethernet_mtu,
-                 config.tcp.window_size, config.tcp.mss);
+    logger->info("[Network] interface={}, ip={}, mac={}, block_size={}, ethernet_mtu={}, tcp_window={}, tcp_mss={}",
+                 config.interface_name, host_ip.to_string(), host_mac.to_string(),
+                 config.block_size, config.link.ethernet_mtu, config.tcp.window_size, config.tcp.mss);
 
     return true;
 }
@@ -221,7 +117,6 @@ void NetworkController::set_interface_name(const std::string& name)
     if (get_mac_by_ifname(interface_name, mac))
     {
         host_mac = MacAddress(std::span(mac));
-        logger->info("detect interface {} mac is {}", interface_name, host_mac.to_string());
     }
 }
 

@@ -26,7 +26,7 @@ public:
     NetworkController(std::shared_ptr<spdlog::logger> logger);
     ~NetworkController() override;
 
-    bool load_config(const std::vector<std::string>& options);
+    bool apply_config(const NetConfig& config);
     const NetConfig& get_config() const;
 
     void deliver_message(uint8_t*, size_t) override;

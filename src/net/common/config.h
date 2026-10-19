@@ -2,11 +2,26 @@
 #define ASYNC_NETWORK_CONFIG_H
 
 #include "types.h"
+#include <utils/log.h>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace coro::net {
+
+// Loggers of the runtime. Each of them owns a dedicated thread pool and sink set.
+struct LogConfig {
+    LogConfig()
+    {
+        // Application logs are meant to be readable without the protocol stack noise.
+        user.level = spdlog::level::info;
+    }
+
+    // Coroutine scheduler and network protocol stack.
+    utils::LoggerSettings runtime;
+    // Application logger, created by the user code as utils::create_async_logger("user", ...).
+    utils::LoggerSettings user;
+};
 
 // Tunables of the link layer.
 struct LinkConfig {
@@ -85,17 +100,21 @@ struct NetConfig {
     std::string interface_name = "eth0";
     std::string host_ip;
 
+    LogConfig log;
     LinkConfig link;
     Ipv4Config ipv4;
     UdpConfig udp;
     TcpConfig tcp;
 
+
+    static bool load(const std::vector<std::string>& options, NetConfig& out, std::vector<std::string>& errors);
+
     // Apply one key=value pair. Returns false and appends a message to errors if the
     // key is unknown or the value can not be parsed.
-    bool apply(std::string_view key, std::string_view value, std::vector<std::string>* errors = nullptr);
+    bool apply(std::string_view key, std::string_view value, std::vector<std::string>& errors);
     // Read a key=value file. Returns false if the file can not be opened; malformed
     // lines are reported through errors while the rest of the file is still applied.
-    bool load_file(const std::string& path, std::vector<std::string>* errors = nullptr);
+    bool load_file(const std::string& path, std::vector<std::string>& errors);
     // Recompute the derived values (MTU, MSS, buffer sizes) and clamp everything into
     // a range the protocol stack can actually handle.
     void normalize();

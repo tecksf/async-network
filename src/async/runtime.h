@@ -6,6 +6,7 @@
 #include "polling.h"
 #include <future>
 #include <spdlog/spdlog.h>
+#include <common/config.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -21,7 +22,7 @@ public:
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     static Runtime*& current();
-    bool start_network(const std::vector<std::string>& options);
+    bool start_network(const net::NetConfig& config);
     std::string network_address() const;
     std::shared_ptr<net::SocketRegistry> current_network() const;
 

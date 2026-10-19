@@ -1,7 +1,10 @@
 #include "config.h"
+#include <utils/log.h>
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
 #include <fstream>
+#include <utility>
 
 namespace coro::net {
 
@@ -61,15 +64,46 @@ bool parse_bool(std::string_view text, bool& value)
     return false;
 }
 
+bool parse_size(std::string_view text, std::size_t& value)
+{
+    std::size_t parsed = 0;
+    const char* first = text.data();
+    const char* last = text.data() + text.size();
+    const auto [ptr, ec] = std::from_chars(first, last, parsed);
+    if (ec != std::errc{} or ptr != last)
+    {
+        return false;
+    }
+
+    value = parsed;
+    return true;
 }
 
-bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<std::string>* errors)
+std::vector<std::string_view> split_options(std::string_view text)
 {
-    auto report = [errors, key](std::string_view reason) {
-        if (errors != nullptr)
+    std::vector<std::string_view> items;
+    size_t offset = 0;
+    while (offset <= text.size())
+    {
+        const auto comma = text.find(',', offset);
+        const auto end = comma == std::string_view::npos ? text.size() : comma;
+        items.push_back(text.substr(offset, end - offset));
+        if (comma == std::string_view::npos)
         {
-            errors->push_back("invalid config '" + std::string(key) + "': " + std::string(reason));
+            break;
         }
+        offset = comma + 1;
+    }
+
+    return items;
+}
+
+}
+
+bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<std::string>& errors)
+{
+    auto report = [&errors, key](std::string_view reason) {
+        errors.push_back("invalid config '" + std::string(key) + "': " + std::string(reason));
         return false;
     };
 
@@ -100,6 +134,96 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
         return true;
     };
 
+    auto read_size = [&](std::size_t& target, std::size_t min, std::size_t max) {
+        std::size_t parsed = 0;
+        if (not parse_size(value, parsed))
+        {
+            return report("'" + std::string(value) + "' is not an integer");
+        }
+
+        if (parsed < min or parsed > max)
+        {
+            return report("'" + std::string(value) + "' is out of range [" + std::to_string(min) + ", " + std::to_string(max) + "]");
+        }
+
+        target = parsed;
+        return true;
+    };
+
+    auto apply_logger_key = [&](utils::LoggerSettings& settings, std::string_view field) {
+        if (field == "level")
+        {
+            const auto level = utils::parse_log_level(value);
+            if (not level.has_value())
+            {
+                return report("'" + std::string(value) + "' is not a log level (trace, debug, info, warn, error, critical or off)");
+            }
+
+            settings.level = level.value();
+            return true;
+        }
+
+        if (field == "enabled")
+        {
+            return read_bool(settings.enabled);
+        }
+
+        if (field == "target")
+        {
+            if (value == "console" or value == "stdout" or value == "terminal")
+            {
+                settings.target = utils::LogTarget::Console;
+            }
+            else if (value == "file")
+            {
+                settings.target = utils::LogTarget::File;
+            }
+            else if (value == "both" or value == "all")
+            {
+                settings.target = utils::LogTarget::Both;
+            }
+            else
+            {
+                return report("'" + std::string(value) + "' is not a log target (console, file or both)");
+            }
+
+            return true;
+        }
+
+        if (field == "file" or field == "file.path")
+        {
+            settings.file.path = std::string(value);
+            return true;
+        }
+
+        if (field == "file.max_size")
+        {
+            return read_size(settings.file.max_size, 0, 1024ull * 1024 * 1024);
+        }
+
+        if (field == "file.max_files")
+        {
+            return read_size(settings.file.max_files, 1, 200000);
+        }
+
+        if (field == "file.rotate_on_open")
+        {
+            return read_bool(settings.file.rotate_on_open);
+        }
+
+        if (field == "queue_size")
+        {
+            return read_size(settings.queue_size, 1, 1024 * 1024);
+        }
+
+        if (field == "threads" or field == "thread_count")
+        {
+            return read_size(settings.thread_count, 1, 1000);
+        }
+
+        return report("unknown key");
+    };
+
     if (key == "interface" or key == "interface_name" or key == "nic")
     {
         interface_name = std::string(value);
@@ -115,6 +239,27 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
     if (key == "block_size")
     {
         return read_int(block_size, ETHERNET_HEADER_SIZE, MAX_BLOCK_SIZE);
+    }
+
+    if (key.starts_with("log.runtime."))
+    {
+        return apply_logger_key(log.runtime, key.substr(std::string_view("log.runtime.").size()));
+    }
+
+    if (key.starts_with("log.user."))
+    {
+        return apply_logger_key(log.user, key.substr(std::string_view("log.user.").size()));
+    }
+
+    // Flat log.* keys configure the runtime logger and stay supported for old config files.
+    if (key.starts_with("log."))
+    {
+        return apply_logger_key(log.runtime, key.substr(4));
+    }
+
+    if (key == "log_level" or key == "log_enabled")
+    {
+        return apply_logger_key(log.runtime, key.substr(4));
     }
 
     if (key == "ethernet_mtu" or key == "link.ethernet_mtu")
@@ -231,7 +376,7 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
     return report("unknown key");
 }
 
-bool NetConfig::load_file(const std::string& path, std::vector<std::string>* errors)
+bool NetConfig::load_file(const std::string& path, std::vector<std::string>& errors)
 {
     std::ifstream stream(path);
     if (not stream.is_open())
@@ -254,10 +399,7 @@ bool NetConfig::load_file(const std::string& path, std::vector<std::string>* err
         const auto separator = text.find('=');
         if (separator == std::string_view::npos)
         {
-            if (errors != nullptr)
-            {
-                errors->push_back("line " + std::to_string(line_number) + ": missing '='");
-            }
+            errors.push_back("line " + std::to_string(line_number) + ": missing '='");
             continue;
         }
 
@@ -265,18 +407,84 @@ bool NetConfig::load_file(const std::string& path, std::vector<std::string>* err
         const std::string_view value = unquote(trim(text.substr(separator + 1)));
 
         std::vector<std::string> local_errors;
-        if (not apply(key, value, &local_errors))
+        if (not apply(key, value, local_errors))
         {
-            if (errors != nullptr)
+            for (const auto& error: local_errors)
             {
-                for (const auto& error: local_errors)
-                {
-                    errors->push_back("line " + std::to_string(line_number) + ": " + error);
-                }
+                errors.push_back("line " + std::to_string(line_number) + ": " + error);
             }
         }
     }
 
+    return true;
+}
+
+bool NetConfig::load(const std::vector<std::string>& options, NetConfig& out, std::vector<std::string>& errors)
+{
+    std::string path = DefaultPath;
+    bool path_given = false;
+    std::vector<std::pair<std::string, std::string>> overrides;
+
+    for (const auto& option: options)
+    {
+        for (const auto& item: split_options(option))
+        {
+            const std::string_view text = trim(item);
+            if (text.empty())
+            {
+                continue;
+            }
+
+            const auto separator = text.find('=');
+            if (separator == std::string_view::npos)
+            {
+                errors.push_back("'" + std::string(text) + "' is not in name=value form");
+                return false;
+            }
+
+            const std::string_view key = trim(text.substr(0, separator));
+            const std::string_view value = trim(text.substr(separator + 1));
+            if (key == "config" or key == "file")
+            {
+                path = std::string(value);
+                path_given = true;
+            }
+            else
+            {
+                overrides.emplace_back(std::string(key), std::string(value));
+            }
+        }
+    }
+
+    NetConfig config;
+    std::vector<std::string> file_errors;
+    if (not config.load_file(path, file_errors) and path_given)
+    {
+        errors.push_back("can not open " + path);
+        return false;
+    }
+
+    for (const auto& [key, value]: overrides)
+    {
+        std::vector<std::string> override_errors;
+        if (not config.apply(key, value, override_errors))
+        {
+            for (const auto& error: override_errors)
+            {
+                errors.push_back(error);
+            }
+
+            return false;
+        }
+    }
+
+    for (const auto& error: file_errors)
+    {
+        errors.push_back(error);
+    }
+
+    config.normalize();
+    out = std::move(config);
     return true;
 }
 
@@ -313,6 +521,14 @@ void NetConfig::normalize()
     ipv4.arp_retry = std::max(ipv4.arp_retry, 1);
 
     block_size = std::clamp(block_size, link.ethernet_mtu + ETHERNET_HEADER_SIZE, MAX_BLOCK_SIZE);
+
+    const auto clamp_logger = [](utils::LoggerSettings& logger) {
+        logger.queue_size = std::clamp<std::size_t>(logger.queue_size, 1, 1024 * 1024);
+        logger.thread_count = std::clamp<std::size_t>(logger.thread_count, 1, 1000);
+    };
+
+    clamp_logger(log.runtime);
+    clamp_logger(log.user);
 }
 
 }

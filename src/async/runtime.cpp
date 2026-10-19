@@ -43,7 +43,6 @@ Runtime::Runtime(int num_workers, std::shared_ptr<spdlog::logger> log)
     impl->polling.reserve(num_workers);
     impl->workers.reserve(num_workers);
     impl->fanout_id = generate_fanout_id();
-    impl->logger->info("[Runtime] packet fanout id: {}", impl->fanout_id);
 
     impl->controller = std::make_shared<net::NetworkController>(impl->logger);
 }
@@ -52,7 +51,7 @@ Runtime::~Runtime()
 {
     stop();
     impl->logger->info("[Runtime] destroyed");
-    spdlog::shutdown();
+    impl->logger->flush();
 }
 
 Runtime*& Runtime::current()
@@ -60,9 +59,11 @@ Runtime*& Runtime::current()
     return CurrentRuntime;
 }
 
-bool Runtime::start_network(const std::vector<std::string>& options)
+bool Runtime::start_network(const net::NetConfig& config)
 {
-    if (not impl->controller->load_config(options))
+    utils::apply_log_settings(impl->logger, config.log.runtime.enabled, config.log.runtime.level);
+
+    if (not impl->controller->apply_config(config))
     {
         impl->logger->error("[Runtime] invalid network configuration, network not started");
         return false;
@@ -106,7 +107,7 @@ void Runtime::start()
         });
     }
 
-    impl->logger->info("[Runtime] created with {} workers", num_workers);
+    impl->logger->info("[Runtime] network start, packet fanout id: {}, created with {} workers", impl->fanout_id, num_workers);
 }
 
 void Runtime::stop() const
