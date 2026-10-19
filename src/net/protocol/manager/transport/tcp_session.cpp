@@ -377,40 +377,42 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
 
     if (header.contains(TcpSegment::FLAG_FIN))
     {
-        auto fin_seq = seq + payload_size;
-        receive_window.acknowledge_finish_sequence(fin_seq);
-        next_state = TcpState::CloseWait;
+        receive_window.acknowledge_finish_sequence(seq + payload_size);
     }
 
     auto outbound = app->allocate_socket_buffer();
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+
+    if (receive_window.is_eof())
+    {
+        next_state = TcpState::CloseWait;
+    }
 
     return next_state;
 }
 
 TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload)
 {
-    uint32_t ack = header.get_ack_number();
     uint32_t seq = header.get_sequence_number();
+    uint32_t payload_size = payload->size();
 
-    if (ack != sequence_number)
+    if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
-        logger->warn("{} invalid ack number: {}", get_string_state(), ack);
-        return state;
+        receive_user_data(header, payload);
     }
 
-    SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
+    auto outbound = app->allocate_socket_buffer();
 
     if (header.contains(TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK))
     {
-        receive_window.acknowledge_finish_sequence(seq);
+        receive_window.acknowledge_finish_sequence(seq + payload_size);
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
         return TcpState::TimeWait;
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
     {
-        receive_window.acknowledge_finish_sequence(seq);
+        receive_window.acknowledge_finish_sequence(seq + payload_size);
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
         return TcpState::Closing;
     }
@@ -426,19 +428,28 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
 
 TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& header, const SocketBuffer& payload)
 {
-    if (not header.contains(TcpSegment::FLAG_FIN))
+    uint32_t seq = header.get_sequence_number();
+    uint32_t payload_size = payload->size();
+
+    if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
-        logger->warn("{} not fin response, will ignore...", get_string_state());
+        receive_user_data(header, payload);
+    }
+
+    if (header.contains(TcpSegment::FLAG_FIN))
+    {
+        receive_window.acknowledge_finish_sequence(seq + payload_size);
+    }
+
+    auto outbound = app->allocate_socket_buffer();
+    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+
+    if (not receive_window.is_eof())
+    {
         return state;
     }
 
-    receive_window.acknowledge_finish_sequence(header.get_sequence_number());
-
-    SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
-    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
-
     start_time_wait_timer();
-
     return TcpState::TimeWait;
 }
 
@@ -455,7 +466,6 @@ TcpState TcpSession::process_tcp_segment_in_closing_state(const TcpSegment& head
         return state;
     }
 
-    sequence_number = header.get_ack_number();
     return TcpState::TimeWait;
 }
 
