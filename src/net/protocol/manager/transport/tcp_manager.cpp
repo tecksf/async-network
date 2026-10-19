@@ -31,7 +31,9 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     fake_header.set_length(inbound->size());
 
     trans::TcpSegment header = segment.value();
-    if (not header.verify(fake_header, inbound))
+
+    bool is_valid_segment = !config.checksum_check or (config.checksum_check and header.verify(fake_header, inbound));
+    if (!is_valid_segment)
     {
         logger->error("Invalid TCP Segment, checksum error");
         co_return;

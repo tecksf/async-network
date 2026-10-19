@@ -287,6 +287,11 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
         return read_int(ipv4.arp_retry, 1, 100);
     }
 
+    if (key == "ipv4.checksum_check" or key == "ipv4_checksum_check")
+    {
+        return read_bool(ipv4.checksum_check);
+    }
+
     if (key == "tcp.window_size" or key == "tcp_window_size")
     {
         return read_int(tcp.window_size, 1024, 65535);
@@ -371,6 +376,11 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
     if (key == "tcp.drop_log_interval" or key == "tcp_drop_log_interval")
     {
         return read_int(tcp.drop_log_interval, 1, 3600);
+    }
+
+    if (key == "tcp.checksum_check" or key == "tcp_checksum_check")
+    {
+        return read_bool(tcp.checksum_check);
     }
 
     return report("unknown key");

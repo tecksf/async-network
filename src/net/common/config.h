@@ -40,6 +40,9 @@ struct Ipv4Config {
     int time_to_live = 64;
     // ARP resolution attempts before an outbound packet is dropped.
     int arp_retry = 5;
+    // Validate the header checksum of an inbound packet. Disabling it is only useful for
+    // debugging, a corrupted header is then passed up to the transport layer.
+    bool checksum_check = true;
 };
 
 // Tunables of the UDP protocol.
@@ -87,6 +90,10 @@ struct TcpConfig {
     int cleanup_interval = 1;
     // Seconds between two "segment dropped" log lines.
     int drop_log_interval = 1;
+
+    // Validate the checksum of an inbound segment. Disabling it is only useful for debugging,
+    // a corrupted segment is then handed to the session state machine.
+    bool checksum_check = true;
 };
 
 // Whole runtime configuration of the network stack. Values come from a key=value

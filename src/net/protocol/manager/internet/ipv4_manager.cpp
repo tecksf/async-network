@@ -52,9 +52,11 @@ co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
     buffer->consume(Ipv4Packet::HeaderSize);
 
     Ipv4Packet packet = input.value();
-    if (not packet.is_valid())
+
+    if (bool is_valid_packet = !config.checksum_check or (config.checksum_check and packet.is_valid()); !is_valid_packet)
     {
-        logger->error("Invalid IP packet");
+        logger->info("Invalid IP packet checksum, sender ip={}, identification={}, fragment offset={}",
+                     packet.get_source_ip().to_string(), packet.get_identification(), packet.get_fragment_offset());
         co_return;
     }
 
