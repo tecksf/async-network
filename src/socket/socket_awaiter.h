@@ -81,6 +81,7 @@ private:
 };
 
 struct TcpWriteAwaiter : AwaiterBase {
+    explicit TcpWriteAwaiter(int err);
     TcpWriteAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
@@ -88,6 +89,7 @@ struct TcpWriteAwaiter : AwaiterBase {
 };
 
 struct TcpReadAwaiter : AwaiterBase {
+    explicit TcpReadAwaiter(int err);
     TcpReadAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer);
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;

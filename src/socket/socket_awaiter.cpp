@@ -260,6 +260,12 @@ std::expected<TcpSocket, std::error_code> TcpConnectAwaiter::await_resume() cons
     return std::unexpected(ec);
 }
 
+TcpWriteAwaiter::TcpWriteAwaiter(int err)
+    : AwaiterBase(nullptr)
+{
+    context.result = err;
+}
+
 TcpWriteAwaiter::TcpWriteAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer)
     : AwaiterBase(network)
 {
@@ -270,7 +276,7 @@ TcpWriteAwaiter::TcpWriteAwaiter(std::shared_ptr<SocketRegistry> network, int fd
 
 bool TcpWriteAwaiter::await_ready() const noexcept
 {
-    return false;
+    return context.result < 0;
 }
 
 bool TcpWriteAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
@@ -292,6 +298,12 @@ std::expected<int, std::error_code> TcpWriteAwaiter::await_resume() const noexce
     return std::unexpected(ec);
 }
 
+TcpReadAwaiter::TcpReadAwaiter(int err)
+    : AwaiterBase(nullptr)
+{
+    context.result = err;
+}
+
 TcpReadAwaiter::TcpReadAwaiter(std::shared_ptr<SocketRegistry> network, int fd, std::span<uint8_t> buffer)
     : AwaiterBase(network)
 {
@@ -302,7 +314,7 @@ TcpReadAwaiter::TcpReadAwaiter(std::shared_ptr<SocketRegistry> network, int fd, 
 
 bool TcpReadAwaiter::await_ready() const noexcept
 {
-    return false;
+    return context.result < 0;
 }
 
 bool TcpReadAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
