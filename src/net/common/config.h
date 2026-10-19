@@ -42,6 +42,10 @@ struct TcpConfig {
     int mss = 0;
     int min_mss = 536;
 
+    // Use the stateless SYN cookie handshake (SYN flood mitigation). Disabled by default: a listener
+    // then allocates a half-open session per SYN and retransmits its SYN-ACK on a repeated SYN.
+    bool syn_cookie = false;
+
     // The stateless handshake encodes the peer MSS into the low bits of the SYN cookie.
     int mss_cookie_step = 4;
     int mss_cookie_bits = 8;

@@ -361,6 +361,73 @@ void TcpListenSession::report_dropped(const SocketAddress& client, std::string_v
     last_drop_log = now;
 }
 
+void TcpListenSession::process_syn(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client)
+{
+    std::shared_ptr<TcpConnectSession> existing;
+    //
+    {
+        std::lock_guard lock(accept_mutex);
+        if (auto iter = accept_queue.find(client); iter != accept_queue.end())
+        {
+            existing = iter->second.session;
+        }
+        else if (accept_queue.size() >= static_cast<size_t>(tcp_config.max_accept_backlog))
+        {
+            report_dropped(client, "accept backlog is full");
+            return;
+        }
+    }
+
+    if (existing)
+    {
+        if (existing->get_state() == TcpState::SynReceived)
+        {
+            // the SYN-ACK is still tracked by the send window, which resends it; the state does not change
+            (void) existing->process_tcp_segment(header, payload);
+        }
+        else
+        {
+            std::lock_guard lock(accept_mutex);
+            report_dropped(client, "duplicated SYN");
+        }
+
+        return;
+    }
+
+    auto session = create_accept_session(client, TcpState::Listen);
+    (void) session->process_tcp_segment(header, payload);
+
+    assert(session->get_state() == TcpState::SynReceived);
+
+    bool admitted = true;
+    //
+    {
+        std::lock_guard lock(accept_mutex);
+        admitted = accept_queue.emplace(client, AcceptEntry{session, std::chrono::steady_clock::now()}).second;
+        if (not admitted)
+        {
+            report_dropped(client, "duplicated accept entry");
+        }
+    }
+
+    if (not admitted)
+    {
+        session->close();
+    }
+}
+
+void TcpListenSession::process_syn_cookie(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client) const
+{
+    // stateless handshake: no session is created for a SYN, the whole handshake state is encoded in the
+    // SYN-ACK sequence number (cookie). Under a flood every SYN costs one hash plus one send, with no
+    // queue entry and no retransmission coroutine.
+    const std::uint32_t client_isn = header.get_sequence_number();
+    const std::uint16_t peer_mss = header.get_all_options().mss.value_or(static_cast<uint16_t>(tcp_config.min_mss));
+    auto outbound = SocketBuffer::reuse_for_outbound(payload);
+    const uint32_t cookie_seq = make_syn_cookie(client, current_cookie_timeslot(), encode_mss_code(peer_mss));
+    send_syn_ack_without_retransmission(outbound, client, cookie_seq, client_isn);
+}
+
 std::pair<std::shared_ptr<TcpConnectSession>, UserSocketContext*>
 TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client)
 {
@@ -384,14 +451,15 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
 
     if (header.contains(TcpSegment::FLAG_SYN) and not header.contains(TcpSegment::FLAG_ACK))
     {
-        // stateless handshake: no session is created for a SYN, the whole handshake state is encoded in the
-        // SYN-ACK sequence number (cookie). Under a flood every SYN costs one hash plus one send, with no
-        // queue entry and no retransmission coroutine.
-        const std::uint32_t client_isn = header.get_sequence_number();
-        const std::uint16_t peer_mss = header.get_all_options().mss.value_or(static_cast<uint16_t>(tcp_config.min_mss));
-        auto outbound = SocketBuffer::reuse_for_outbound(payload);
-        uint32_t cookie_seq = make_syn_cookie(client, current_cookie_timeslot(), encode_mss_code(peer_mss));
-        send_syn_ack_without_retransmission(outbound, client, cookie_seq, client_isn);
+        if (tcp_config.syn_cookie)
+        {
+            process_syn_cookie(header, payload, client);
+        }
+        else
+        {
+            process_syn(header, payload, client);
+        }
+
         return {nullptr, nullptr};
     }
 
@@ -405,10 +473,10 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
         }
     }
 
-    // this session has already completed the handshake, so its state is Established or a later one
+    // the entry is either a half-open session (stateful handshake) or one that already finished the handshake
     if (client_session)
     {
-        client_session->process_tcp_segment(header, payload);
+        (void) client_session->process_tcp_segment(header, payload);
 
         std::lock_guard lock(accept_mutex);
         if (client_session->is_connected() and not accept_waiters.empty())
@@ -441,7 +509,7 @@ TcpListenSession::process_tcp_segment(const TcpSegment& header, const SocketBuff
     // valid cookie: preload the sequence numbers, create the session and let the state machine finish the handshake
     auto session = create_accept_session(client);
     session->restore_syn_cookie_state(ack_number - 1, header.get_sequence_number() - 1, peer_mss);
-    session->process_tcp_segment(header, payload);
+    (void) session->process_tcp_segment(header, payload);
 
     // the sequence numbers were preloaded from the cookie, so the state machine must reach Established
     assert(session->is_connected());

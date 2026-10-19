@@ -44,6 +44,23 @@ bool parse_int(std::string_view text, int& value)
     return true;
 }
 
+bool parse_bool(std::string_view text, bool& value)
+{
+    if (text == "1" or text == "true" or text == "yes" or text == "on")
+    {
+        value = true;
+        return true;
+    }
+
+    if (text == "0" or text == "false" or text == "no" or text == "off")
+    {
+        value = false;
+        return true;
+    }
+
+    return false;
+}
+
 }
 
 bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<std::string>* errors)
@@ -66,6 +83,17 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
         if (parsed < min or parsed > max)
         {
             return report("'" + std::string(value) + "' is out of range [" + std::to_string(min) + ", " + std::to_string(max) + "]");
+        }
+
+        target = parsed;
+        return true;
+    };
+
+    auto read_bool = [&](bool& target) {
+        bool parsed = false;
+        if (not parse_bool(value, parsed))
+        {
+            return report("'" + std::string(value) + "' is not a boolean (use 0/1, false/true, no/yes or off/on)");
         }
 
         target = parsed;
@@ -128,6 +156,11 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
     if (key == "tcp.min_mss" or key == "tcp_min_mss")
     {
         return read_int(tcp.min_mss, 64, 65535);
+    }
+
+    if (key == "tcp.syn_cookie" or key == "tcp_syn_cookie")
+    {
+        return read_bool(tcp.syn_cookie);
     }
 
     if (key == "tcp.mss_cookie_step" or key == "tcp_mss_cookie_step")

@@ -233,9 +233,9 @@ private:
     void send_syn_ack_without_retransmission(const SocketBuffer& outbound, const SocketAddress& client, std::uint32_t cookie,
                                              std::uint32_t client_isn) const;
 
-    // collect and remove timed-out accept entries; the caller closes these sessions outside the lock
+    void process_syn(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client);
+    void process_syn_cookie(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client) const;
     TCP_LOCK_REQUIRED void collect_expired_accepts(std::vector<std::shared_ptr<TcpConnectSession>>& expired);
-    // throttled drop/error logging, so a flood can not flood the log as well
     TCP_LOCK_REQUIRED void report_dropped(const SocketAddress& client, std::string_view reason);
 
     const std::uint64_t syn_cookie_key0;

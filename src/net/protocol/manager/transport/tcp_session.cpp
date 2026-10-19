@@ -197,6 +197,11 @@ std::optional<TcpStateTransition> TcpSession::switch_to(TcpState next_state)
     state.store(next_state, std::memory_order_release);
     logger->debug("===> TCP session [{0}] State change: {1} --> {2}", session_id, get_state_name(prev_state), get_state_name(next_state));
 
+    if (next_state == TcpState::Closed)
+    {
+        session_events->on_session_closed(shared_from_this());
+    }
+
     return TcpStateTransition{.prev = prev_state, .next = next_state};
 }
 
@@ -262,6 +267,12 @@ TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& heade
 
 TcpState TcpSession::process_tcp_segment_in_syn_received_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    if (header.contains(TcpSegment::FLAG_SYN) and not header.contains(TcpSegment::FLAG_ACK))
+    {
+        logger->debug("===> TCP session [{0}] retransmitted SYN, SYN-ACK is resent by the send window", session_id);
+        return state;
+    }
+
     if (not header.contains(TcpSegment::FLAG_ACK))
     {
         logger->warn("{} not ack response, will ignore...", get_string_state());
@@ -733,22 +744,11 @@ co_async<> TcpSession::time_wait_timer(std::shared_ptr<TcpSession> session, std:
         co_return;
     }
 
-    bool superseded = false;
-    //
-    {
-        std::lock_guard lock(session->session_mutex);
-
-        superseded = session->time_wait_cancelled != token;
-        if (not superseded)
-        {
-            session->switch_to(TcpState::Closed);
-        }
-    }
-
-    if (not superseded)
+    std::lock_guard lock(session->session_mutex);
+    if (bool superseded = session->time_wait_cancelled != token; not superseded)
     {
         session->logger->debug("===> TCP session [{0}] TimeWait timer expired, closing session", session->session_id);
-        session->session_events->on_session_closed(session);
+        session->switch_to(TcpState::Closed);
     }
 }
 
@@ -756,11 +756,6 @@ void TcpSession::on_retransmission_failed()
 {
     logger->error("===> TCP session [{0}] segment retransmission failed on remote port {1}, closing session", session_id, remote.port);
     close(-ETIMEDOUT);
-
-    if (is_closed())
-    {
-        session_events->on_session_closed(shared_from_this());
-    }
 }
 
 std::optional<TcpStateTransition> TcpSession::close(int error)
@@ -792,8 +787,15 @@ std::optional<TcpStateTransition> TcpSession::close(int error)
             next_state = TcpState::Closed;
             break;
         case TcpState::Established:
-            send_fin_segment();
-            next_state = TcpState::FinWait1;
+            if (error == 0)
+            {
+                send_fin_segment();
+                next_state = TcpState::FinWait1;
+            }
+            else
+            {
+                next_state == TcpState::Closed;
+            }
             break;
         case TcpState::FinWait1: break;
         case TcpState::FinWait2: break;
