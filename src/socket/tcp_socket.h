@@ -1,9 +1,11 @@
 #ifndef ASYNC_NETWORK_TCP_SOCKET_H
 #define ASYNC_NETWORK_TCP_SOCKET_H
 
+#include <expected>
 #include <memory>
 #include <span>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 #include "socket.h"
@@ -23,6 +25,7 @@ public:
     TcpReadStream& operator=(TcpReadStream&& other) noexcept;
 
     TcpReadAwaiter read(std::span<uint8_t> data) const;
+    std::expected<void, std::error_code> shutdown() const;
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
 
@@ -45,7 +48,7 @@ public:
     TcpWriteAwaiter write(std::span<uint8_t> data) const;
     TcpWriteAwaiter write(std::string_view data) const;
 
-    void close();
+    std::expected<void, std::error_code> shutdown() const;
     SocketAddress get_local_address() const;
     SocketAddress get_remote_address() const;
 
@@ -54,7 +57,6 @@ private:
     explicit TcpWriteStream(std::shared_ptr<trans::TcpSession> session);
 
     std::shared_ptr<trans::TcpSession> session;
-    bool closed = false;
 };
 
 class TcpSocket {
@@ -74,7 +76,9 @@ public:
     TcpWriteAwaiter write(std::span<uint8_t> data) const;
     TcpWriteAwaiter write(std::string_view data) const;
     TcpReadAwaiter read(std::span<uint8_t> data) const;
-    CloseAwaiter close();
+
+    std::expected<void, std::error_code> shutdown(ShutdownHow how) const;
+    void close();
     std::pair<TcpReadStream, TcpWriteStream> split() &&;
 
 private:

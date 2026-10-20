@@ -48,23 +48,15 @@ bool TcpSession::is_writable() const
 bool TcpSession::is_readable() const
 {
     const TcpState current = state.load(std::memory_order_acquire);
-    return current == TcpState::Established || current == TcpState::FinWait1 || current == TcpState::FinWait2 || current ==
-           TcpState::CloseWait;
-}
-
-std::pair<bool, bool> TcpSession::get_read_status() const
-{
-    std::lock_guard lock(session_mutex);
-    bool readable = receive_window.has_readable_data();
-    bool eof = receive_window.is_eof();
-    return std::pair{readable, eof};
+    return current == TcpState::Established || current == TcpState::FinWait1 || current == TcpState::FinWait2 ||
+           current == TcpState::CloseWait;
 }
 
 std::pair<size_t, bool> TcpSession::read_into(std::span<uint8_t> out)
 {
     std::lock_guard lock(session_mutex);
     size_t count = receive_window.read_into(out);
-    bool eof = receive_window.is_eof();
+    bool eof = read_shutdown or receive_window.is_eof();
 
     if (count > 0 and is_readable() and receive_window.need_window_update(get_send_mss()))
     {
@@ -74,28 +66,25 @@ std::pair<size_t, bool> TcpSession::read_into(std::span<uint8_t> out)
     return std::pair{count, eof};
 }
 
-TcpSessionResult TcpSession::try_to_add_read_waiter(TcpSocketUser* ctx)
+TcpSessionResult TcpSession::try_to_add_read_waiter(TcpSocketUser* user)
 {
     TcpSessionResult result;
-    if (ctx == nullptr)
+    if (user == nullptr)
     {
         return result;
     }
 
     std::lock_guard lock(session_mutex);
 
-    if (is_readable())
+    if (receive_window.has_readable_data())
     {
-        if (receive_window.has_readable_data())
-        {
-            result.kind = TcpSessionResult::Kind::Readable;
-        }
-        else if (receive_window.is_eof())
-        {
-            result.kind = TcpSessionResult::Kind::EndOfStream;
-        }
+        result.kind = TcpSessionResult::Kind::Readable;
     }
-    else
+    else if (read_shutdown or receive_window.is_eof())
+    {
+        result.kind = TcpSessionResult::Kind::EndOfStream;
+    }
+    else if (is_closed())
     {
         result.kind = TcpSessionResult::Kind::Closed;
         result.error = closed_reason != std::errc{} ? closed_reason : std::errc::not_connected;
@@ -103,11 +92,11 @@ TcpSessionResult TcpSession::try_to_add_read_waiter(TcpSocketUser* ctx)
 
     if (result.kind == TcpSessionResult::Kind::None)
     {
-        waiter = ctx;
+        this->waiter = user;
     }
     else
     {
-        result.waiter = ctx;
+        result.waiter = user;
     }
 
     return result;
@@ -180,6 +169,13 @@ TcpSessionResult TcpSession::process_tcp_segment(const TcpSegment& header, const
         return fill_session_result(process_tcp_reset(header));
     }
 
+    if (read_shutdown and payload->size() > 0)
+    {
+        logger->warn("===> TCP session [{0}] received {1} byte(s) after the read side was shut down, resetting the connection",
+                     session_id, payload->size());
+        return fill_session_result(terminate_session(std::errc::connection_reset, true));
+    }
+
     if (header.is_ack())
     {
         send_window.update_peer_window(header.get_window_size(), header.get_sequence_number(), header.get_ack_number());
@@ -243,6 +239,10 @@ std::optional<TcpStateTransition> TcpSession::switch_to(TcpState next_state)
     state.store(next_state, std::memory_order_release);
     logger->debug("===> TCP session [{0}] State change: {1} --> {2}", session_id, get_state_name(prev_state), get_state_name(next_state));
 
+    if (next_state == TcpState::TimeWait)
+    {
+        start_time_wait_timer();
+    }
     if (next_state == TcpState::Closed)
     {
         session_events->on_session_closed(shared_from_this());
@@ -269,13 +269,13 @@ TcpSessionResult TcpSession::fill_session_result(const std::optional<TcpStateTra
         }
     }
 
-    if (result.kind == TcpSessionResult::Kind::None and is_readable())
+    if (result.kind == TcpSessionResult::Kind::None)
     {
         if (receive_window.has_readable_data())
         {
             result.kind = TcpSessionResult::Kind::Readable;
         }
-        else if (receive_window.is_eof())
+        else if (read_shutdown or receive_window.is_eof())
         {
             result.kind = TcpSessionResult::Kind::EndOfStream;
         }
@@ -380,21 +380,23 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
         receive_window.acknowledge_finish_sequence(seq + payload_size);
     }
 
-    auto outbound = app->allocate_socket_buffer();
-    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
-
-    if (receive_window.is_eof())
+    if (receive_window.is_receive_complete())
     {
         next_state = TcpState::CloseWait;
     }
+
+    auto outbound = app->allocate_socket_buffer();
+    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
 
     return next_state;
 }
 
 TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    uint32_t ack = header.get_ack_number();
     uint32_t seq = header.get_sequence_number();
     uint32_t payload_size = payload->size();
+    TcpState next_state = state;
 
     if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
@@ -406,30 +408,34 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
     if (header.contains(TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK))
     {
         receive_window.acknowledge_finish_sequence(seq + payload_size);
+        if (ack == sequence_number && receive_window.is_receive_complete())
+        {
+            next_state = TcpState::TimeWait;
+        }
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
-        return TcpState::TimeWait;
     }
-
-    if (header.contains(TcpSegment::FLAG_FIN))
+    else if (header.contains(TcpSegment::FLAG_FIN))
     {
         receive_window.acknowledge_finish_sequence(seq + payload_size);
+        next_state = TcpState::Closing;
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
-        return TcpState::Closing;
     }
-
-    if (header.contains(TcpSegment::FLAG_ACK))
+    else if (header.contains(TcpSegment::FLAG_ACK))
     {
-        return TcpState::FinWait2;
+        if (ack == sequence_number)
+        {
+            next_state = TcpState::FinWait2;
+        }
     }
 
-    logger->warn("{} unexpected segment, will ignore...", get_string_state());
-    return state;
+    return next_state;
 }
 
 TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& header, const SocketBuffer& payload)
 {
     uint32_t seq = header.get_sequence_number();
     uint32_t payload_size = payload->size();
+    TcpState next_state = state;
 
     if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
@@ -441,16 +447,15 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
         receive_window.acknowledge_finish_sequence(seq + payload_size);
     }
 
+    if (receive_window.is_receive_complete())
+    {
+        next_state = TcpState::TimeWait;
+    }
+
     auto outbound = app->allocate_socket_buffer();
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
 
-    if (not receive_window.is_eof())
-    {
-        return state;
-    }
-
-    start_time_wait_timer();
-    return TcpState::TimeWait;
+    return next_state;
 }
 
 TcpState TcpSession::process_tcp_segment_in_close_wait_state(const TcpSegment& header, const SocketBuffer& payload)
@@ -575,7 +580,22 @@ bool TcpSession::verify_reset_sequence(uint32_t seq_num)
 
 std::optional<TcpStateTransition> TcpSession::abort_session(std::errc ec)
 {
-    logger->warn("===> TCP session [{0}] aborted by peer (RST), State: {1} --> Closed", session_id, get_string_state());
+    return terminate_session(ec, false);
+}
+
+std::optional<TcpStateTransition> TcpSession::terminate_session(std::errc ec, bool send_reset)
+{
+    if (send_reset)
+    {
+        logger->warn("===> TCP session [{0}] is reset by local side, State: {1} --> Closed", session_id, get_string_state());
+        auto outbound = app->allocate_socket_buffer();
+        send_tcp_segment(outbound, TcpSegment::FLAG_RST | TcpSegment::FLAG_ACK);
+    }
+    else
+    {
+        logger->warn("===> TCP session [{0}] aborted by peer (RST), State: {1} --> Closed", session_id, get_string_state());
+    }
+
     stop_persist_probe();
     send_window.cancel_pending_segments();
 
@@ -777,10 +797,14 @@ std::expected<int, std::errc> TcpSession::send_user_data(const std::vector<Socke
 
     if (not is_writable())
     {
-        // The socket keeps this session alive after the manager unregisters it, so a write that
-        // arrives too late still reports why the connection is gone (reset, timeout, local close).
-        const std::errc reason = closed_reason != std::errc{} ? closed_reason : std::errc::not_connected;
-        // logger->warn("{} session not writable, will ignore...", get_string_state());
+        auto is_fin_sent = [](TcpState state)-> bool {
+            return state == TcpState::FinWait1 or state == TcpState::FinWait2 or state == TcpState::Closing or
+                   state == TcpState::LastAck or state == TcpState::TimeWait;
+        };
+
+        const std::errc reason = is_fin_sent(get_state())
+                                     ? std::errc::broken_pipe
+                                     : (closed_reason != std::errc{} ? closed_reason : std::errc::not_connected);
         return std::unexpected(reason);
     }
 
@@ -839,17 +863,59 @@ void TcpSession::on_retransmission_failed()
     close(std::errc::timed_out);
 }
 
+void TcpSession::send_fin_segment()
+{
+    auto outbound = app->allocate_socket_buffer();
+    send_tcp_segment(outbound, TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK);
+    sequence_number += 1;
+}
+
+std::expected<void, std::errc> TcpSession::shutdown(ShutdownHow how)
+{
+    std::lock_guard lock(session_mutex);
+
+    const TcpState current = state.load(std::memory_order_relaxed);
+    if (current == TcpState::Closed)
+    {
+        return std::unexpected(closed_reason != std::errc{} ? closed_reason : std::errc::not_connected);
+    }
+
+    if (how == ShutdownHow::Read or how == ShutdownHow::Both)
+    {
+        read_shutdown = true;
+    }
+
+    if (how == ShutdownHow::Write or how == ShutdownHow::Both)
+    {
+        switch (current)
+        {
+            case TcpState::Established:
+                send_fin_segment();
+                (void) switch_to(TcpState::FinWait1);
+                break;
+            case TcpState::CloseWait:
+                send_fin_segment();
+                (void) switch_to(TcpState::LastAck);
+                break;
+            case TcpState::Listen:
+            case TcpState::SynSent:
+            case TcpState::SynReceived:
+                return std::unexpected(std::errc::not_connected);
+            default:
+                break;
+        }
+    }
+
+    return {};
+}
+
 std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
 {
     std::unique_lock mutex(session_mutex);
 
     stop_persist_probe();
 
-    auto send_fin_segment = [this]() {
-        auto outbound = app->allocate_socket_buffer();
-        send_tcp_segment(outbound, TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK);
-        sequence_number += 1;
-    };
+    read_shutdown = true;
 
     const TcpState current = state.load(std::memory_order_relaxed);
     TcpState next_state = current;

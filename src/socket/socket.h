@@ -25,6 +25,12 @@ enum class SocketOperation {
     Close
 };
 
+enum class ShutdownHow {
+    Read = 0,
+    Write = 1,
+    Both = 2,
+};
+
 class SocketUser {
 public:
     explicit SocketUser(SocketOperation operation)

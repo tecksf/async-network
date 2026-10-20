@@ -25,7 +25,7 @@ public:
     TcpListener(TcpListener&& other) noexcept;
     TcpListener& operator=(TcpListener&& other) noexcept;
     TcpAcceptAwaiter accept() const;
-    CloseAwaiter close();
+    void close();
 
 private:
     explicit TcpListener(std::shared_ptr<trans::TcpListenSession> session);

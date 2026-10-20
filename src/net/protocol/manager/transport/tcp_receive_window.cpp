@@ -207,6 +207,11 @@ bool TcpReceiveWindow::is_eof() const
     return finish_sequence.has_value() && read_sequence >= finish_sequence.value();
 }
 
+bool TcpReceiveWindow::is_receive_complete() const
+{
+    return finish_sequence.has_value() && next_expected_sequence == finish_sequence.value() + 1;
+}
+
 void TcpReceiveWindow::drop_consumed_data()
 {
     while (not buffer.empty())

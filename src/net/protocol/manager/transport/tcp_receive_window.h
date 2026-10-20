@@ -29,6 +29,7 @@ public:
 
     bool is_eof() const;
     bool has_readable_data() const;
+    bool is_receive_complete() const;
     size_t read_into(std::span<uint8_t> out);
     void acknowledge_finish_sequence(uint32_t seq);
     bool reassemble(uint32_t seq_number, const SocketBuffer& payload);

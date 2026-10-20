@@ -59,15 +59,13 @@ TcpAcceptAwaiter TcpListener::accept() const
     return TcpAcceptAwaiter(session);
 }
 
-CloseAwaiter TcpListener::close()
+void TcpListener::close()
 {
     if (session)
     {
         session->close();
         session.reset();
     }
-
-    return CloseAwaiter();
 }
 
 }

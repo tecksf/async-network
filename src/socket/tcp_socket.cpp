@@ -6,6 +6,25 @@
 
 namespace coro::net {
 
+namespace {
+
+std::expected<void, std::error_code> shutdown_session(const std::shared_ptr<trans::TcpSession>& session, ShutdownHow how)
+{
+    if (not session)
+    {
+        return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    }
+
+    if (auto result = session->shutdown(how); not result)
+    {
+        return std::unexpected(std::make_error_code(result.error()));
+    }
+
+    return {};
+}
+
+}
+
 TcpReadStream::TcpReadStream(std::shared_ptr<trans::TcpSession> session)
     : session(std::move(session))
 {
@@ -31,6 +50,11 @@ TcpReadAwaiter TcpReadStream::read(std::span<uint8_t> data) const
     return TcpReadAwaiter(session, data);
 }
 
+std::expected<void, std::error_code> TcpReadStream::shutdown() const
+{
+    return shutdown_session(session, ShutdownHow::Read);
+}
+
 SocketAddress TcpReadStream::get_local_address() const
 {
     return session ? session->get_local_address() : SocketAddress{};
@@ -48,16 +72,15 @@ TcpWriteStream::TcpWriteStream(std::shared_ptr<trans::TcpSession> session)
 
 TcpWriteStream::~TcpWriteStream()
 {
-    close();
+    (void) shutdown();
 }
 
 TcpWriteStream& TcpWriteStream::operator=(TcpWriteStream&& other) noexcept
 {
     if (this != &other)
     {
-        close();
+        (void) shutdown();
         session = std::move(other.session);
-        closed = other.closed;
     }
 
     return *this;
@@ -65,7 +88,7 @@ TcpWriteStream& TcpWriteStream::operator=(TcpWriteStream&& other) noexcept
 
 TcpWriteAwaiter TcpWriteStream::write(std::span<uint8_t> data) const
 {
-    if (not session or closed)
+    if (not session)
     {
         return TcpWriteAwaiter(std::errc::not_connected);
     }
@@ -78,13 +101,9 @@ TcpWriteAwaiter TcpWriteStream::write(std::string_view data) const
     return write(std::span((uint8_t*) data.data(), data.size()));
 }
 
-void TcpWriteStream::close()
+std::expected<void, std::error_code> TcpWriteStream::shutdown() const
 {
-    if (not closed && session)
-    {
-        closed = true;
-        session->close();
-    }
+    return shutdown_session(session, ShutdownHow::Write);
 }
 
 SocketAddress TcpWriteStream::get_local_address() const
@@ -182,15 +201,18 @@ TcpReadAwaiter TcpSocket::read(std::span<uint8_t> data) const
     return TcpReadAwaiter(session, data);
 }
 
-CloseAwaiter TcpSocket::close()
+std::expected<void, std::error_code> TcpSocket::shutdown(ShutdownHow how) const
+{
+    return shutdown_session(session, how);
+}
+
+void TcpSocket::close()
 {
     if (session)
     {
         session->close();
         session.reset();
     }
-
-    return CloseAwaiter();
 }
 
 std::pair<TcpReadStream, TcpWriteStream> TcpSocket::split() &&

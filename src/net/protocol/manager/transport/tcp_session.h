@@ -103,7 +103,6 @@ public:
     bool is_writable() const;
     bool is_readable() const;
     virtual bool is_listen_session() const { return false; }
-    std::pair<bool, bool> get_read_status() const;
     std::pair<size_t, bool> read_into(std::span<uint8_t> out);
     int get_socket_fd() const;
     TcpState get_state() const;
@@ -115,9 +114,10 @@ public:
 
     [[nodiscard]] TcpSessionResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
     std::optional<TcpStateTransition> close(std::errc ec = std::errc{});
+    std::expected<void, std::errc> shutdown(ShutdownHow how);
     std::expected<int, std::errc> send_user_data(std::span<uint8_t> user_data);
     std::expected<int, std::errc> send_user_data(const std::vector<SocketBuffer>& payloads);
-    TcpSessionResult try_to_add_read_waiter(TcpSocketUser* ctx);
+    TcpSessionResult try_to_add_read_waiter(TcpSocketUser* user);
 
 protected:
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> switch_to(TcpState next_state);
@@ -126,6 +126,7 @@ protected:
     TCP_LOCK_REQUIRED SocketBuffer compose_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint32_t sequence,
                                                        const TcpOptionSet* options = nullptr);
     TCP_LOCK_REQUIRED void send_window_update();
+    TCP_LOCK_REQUIRED void send_fin_segment();
     TCP_LOCK_REQUIRED void start_persist_probe();
     TCP_LOCK_REQUIRED void stop_persist_probe();
     TCP_LOCK_REQUIRED void send_persist_probe(const SocketBuffer& payload);
@@ -157,6 +158,7 @@ protected:
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> process_tcp_reset(const TcpSegment& header);
     TCP_LOCK_REQUIRED bool verify_reset_sequence(uint32_t seq_num);
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> abort_session(std::errc ec);
+    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> terminate_session(std::errc ec, bool send_reset);
 
 protected:
     app::ApplicationService* app;
@@ -173,6 +175,8 @@ protected:
 
     mutable std::mutex session_mutex;
     uint32_t sequence_number;
+
+    bool read_shutdown = false;
 
     // MSS advertised by the peer (already clamped): the handshake thread writes it and the application
     // thread reads it, so an atomic keeps both sides free of the session lock.
