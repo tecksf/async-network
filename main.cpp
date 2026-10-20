@@ -1,11 +1,11 @@
 #include <chrono>
+#include <iostream>
 #include <string>
 #include <vector>
 #include <utils/log.h>
 #include <async/coro.h>
 #include <async/runtime.h>
 #include <async/socket.h>
-#include <spdlog/async.h>
 
 using namespace coro::net;
 
@@ -33,14 +33,14 @@ static co_async<> start_udp_echo(std::shared_ptr<spdlog::logger> logger, std::st
         auto result = co_await socket.receive_from(data);
         if (not result.has_value())
         {
-            spdlog::error("Receive failed: {}", result.error().message());
+            logger->error("Receive failed: {}", result.error().message());
             break;
         }
 
         auto [count, client] = result.value();
 
         std::string text(data.begin(), data.begin() + count);
-        spdlog::info("Received {} bytes from {} ==> {}", count, std::string(client), text);
+        logger->info("Received {} bytes from {} ==> {}", count, std::string(client), text);
         co_await socket.send_to(text, client);
 
         if (text == "quit")
@@ -55,36 +55,47 @@ static co_async<> start_udp_echo(std::shared_ptr<spdlog::logger> logger, std::st
     co_return;
 }
 
-
-static co_async<> start_tcp_client(TcpSocket socket, std::shared_ptr<spdlog::logger> logger, coro::WaitGroup& group)
+static co_async<> start_tcp_read_stream(TcpReadStream rx, std::shared_ptr<spdlog::logger> logger, coro::WaitGroup& group)
 {
-    logger->info("Accepted a new connection from {}", socket.get_remote_address().to_string());
-    co_await socket.write("hello, I'm tcp echo!");
-
     std::vector<uint8_t> buffer;
     buffer.resize(4096);
     std::span data(buffer);
 
     while (true)
     {
-        auto res = co_await socket.read(data);
+        auto res = co_await rx.read(data);
         if (not res.has_value())
         {
             logger->error("Read failed: {}", res.error().message());
-            co_await socket.close();
             break;
         }
 
         int count = res.value();
         if (count == 0)
         {
-            logger->info("Connection closed by remote");
-            co_await socket.close();
+            logger->info("read end of stream");
             break;
         }
 
         std::string text(data.begin(), data.begin() + count);
-        spdlog::info("Received {} bytes ==> {}", count, text);
+        logger->info("Received {} bytes ==> {}", count, text);
+    }
+
+    group.done();
+    co_return;
+}
+
+static co_async<> start_tcp_write_stream(TcpWriteStream tx, std::shared_ptr<spdlog::logger> logger, coro::WaitGroup& group)
+{
+    while (true)
+    {
+        co_await coro::sleep(std::chrono::seconds(3));
+        auto result = co_await tx.write("xxxx");
+        if (not result.has_value())
+        {
+            logger->warn("write failed, error={}", result.error().message());
+            break;
+        }
     }
 
     group.done();
@@ -116,8 +127,14 @@ static co_async<> start_tcp_echo(std::shared_ptr<spdlog::logger> logger, std::st
             break;
         }
 
+        auto socket = std::move(result.value());
+        logger->info("Accepted a new connection from {}", socket.get_remote_address().to_string());
+        auto [rx, tx] = std::move(socket).split();
+
         group.add(1);
-        coro::spawn(start_tcp_client(std::move(result.value()), logger, group));
+        coro::spawn(start_tcp_read_stream(std::move(rx), logger, group));
+        // coro::spawn(start_tcp_write_stream(std::move(tx), logger, group));
+        tx.shutdown();
     }
 
     group.done();
@@ -141,7 +158,7 @@ static co_async<> start_tcp_connect(std::shared_ptr<spdlog::logger> logger, coro
                  socket.get_local_address().to_string(), socket.get_remote_address().to_string());
 
     co_await socket.write("hello, I'm tcp client!");
-    co_await socket.close();
+    socket.close();
 
     group.done();
 }
@@ -151,10 +168,10 @@ static co_async<> co_main(std::shared_ptr<spdlog::logger> logger, std::string ne
     logger->info("co_main start");
 
     coro::WaitGroup group;
-    group.add(3);
+    group.add(2);
     coro::spawn(start_udp_echo(logger, network_address, group));
     coro::spawn(start_tcp_echo(logger, network_address, group));
-    coro::spawn(start_tcp_connect(logger, group));
+    // coro::spawn(start_tcp_connect(logger, group));
 
     co_await group.wait();
     co_return;
@@ -169,20 +186,29 @@ int main(int argc, char* argv[])
         options.emplace_back(argv[i]);
     }
 
-    spdlog::init_thread_pool(8192, 1, [] {
-        return std::make_shared<spdlog::details::thread_pool>(8192, 1);
-    });
-
-    auto logger = utils::create_async_logger("runtime");
-
-    coro::Runtime runtime(4, logger);
-    if (not runtime.start_network(options))
+    NetConfig config;
+    std::vector<std::string> errors;
+    const bool loaded = NetConfig::load(options, config, errors);
+    for (const auto& error: errors)
     {
-        logger->error("Usage: {} [config=<path>] [interface=<name>] [ip=<address>] [key=value,...]", argv[0]);
+        std::cerr << "[config] " << error << '\n';
+    }
+    if (not loaded)
+    {
         return 1;
     }
 
-    runtime.block_on(co_main(logger, runtime.network_address()));
+    auto runtime_logger = utils::create_async_logger("runtime", config.log.runtime);
+    auto user_logger = utils::create_async_logger("user", config.log.user);
+
+    coro::Runtime runtime(4, runtime_logger);
+    if (not runtime.start_network(config))
+    {
+        runtime_logger->error("Usage: {} [config=<path>] [interface=<name>] [ip=<address>] [key=value,...]", argv[0]);
+        return 1;
+    }
+
+    runtime.block_on(co_main(user_logger, runtime.network_address()));
 
     return 0;
 }

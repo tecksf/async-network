@@ -1,5 +1,6 @@
 #include "network_controller.h"
 #include <async/polling.h>
+#include <async/coro.h>
 #include <sys/socket.h>
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
@@ -340,7 +341,7 @@ SocketBuffer NetworkController::allocate_socket_buffer()
 
 void NetworkController::sumit_task(std::coroutine_handle<> h)
 {
-    spawn_local(h);
+    coro::spawn(h);
 }
 
 link::RetrieveMacAwaiter NetworkController::retrieve_mac_address(const IpAddress& ip)
