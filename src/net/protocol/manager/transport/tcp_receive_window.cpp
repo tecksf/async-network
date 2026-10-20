@@ -115,7 +115,7 @@ size_t TcpReceiveWindow::read_into(std::span<uint8_t> out)
         }
 
         const uint32_t length = std::min(limit, static_cast<uint32_t>(payload->size()));
-        std::copy_n(payload->begin(), length, out.begin() + total);
+        payload->copy_to(out.subspan(total, length));
 
         payload->consume(length);
         used_bytes -= length;

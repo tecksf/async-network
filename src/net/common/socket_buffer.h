@@ -2,7 +2,6 @@
 #define ASYNC_NETWORK_SOCKET_BUFFER_H
 
 #include <cstddef>
-#include <cstdint>
 #include <deque>
 #include <functional>
 #include <iterator>
@@ -10,17 +9,12 @@
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace coro::net {
 
 enum class Dir { Forward, Backward };
-
-class SocketBufferIteratorView {
-public:
-    virtual ~SocketBufferIteratorView() = default;
-    virtual std::span<uint8_t> get_span(int index) const = 0;
-    virtual size_t get_span_count() const = 0;
-};
 
 template<typename T>
 class SocketBufferIterator {
@@ -31,9 +25,12 @@ public:
     using difference_type = std::ptrdiff_t;
     using pointer = T*;
     using reference = T&;
+    using span_list = std::conditional_t<std::is_const_v<T>,
+        std::vector<std::span<const uint8_t>>,
+        std::vector<std::span<uint8_t>>>;
 
-    explicit SocketBufferIterator(const SocketBufferIteratorView* view = nullptr)
-        : owner_view(view)
+    explicit SocketBufferIterator(span_list spans = {})
+        : spans(std::move(spans))
     {
         seek();
     }
@@ -67,11 +64,11 @@ public:
 
     friend bool operator==(const SocketBufferIterator& lhs, const SocketBufferIterator& rhs)
     {
-        if (lhs.owner_view == nullptr || rhs.owner_view == nullptr)
+        if (lhs.spans.empty() || rhs.spans.empty())
         {
-            return lhs.owner_view == rhs.owner_view;
+            return lhs.spans.empty() && rhs.spans.empty();
         }
-        return lhs.owner_view == rhs.owner_view && lhs.current_span.data() == rhs.current_span.data() && lhs.offset == rhs.offset;
+        return lhs.current_span.data() == rhs.current_span.data() && lhs.offset == rhs.offset;
     }
 
     friend bool operator!=(const SocketBufferIterator& lhs, const SocketBufferIterator& rhs)
@@ -82,14 +79,9 @@ public:
 private:
     void seek()
     {
-        if (owner_view == nullptr)
+        while (span_index < spans.size())
         {
-            return;
-        }
-
-        while (span_index < owner_view->get_span_count())
-        {
-            const std::span<uint8_t> data = owner_view->get_span(span_index);
+            const std::span<T> data = spans[span_index];
             if (not data.empty())
             {
                 current_span = data;
@@ -99,21 +91,25 @@ private:
             ++span_index;
         }
 
-        owner_view = nullptr;
+        spans = {};
+        current_span = {};
+        span_index = 0;
+        offset = 0;
     }
 
-    const SocketBufferIteratorView* owner_view;
+    span_list spans;
     std::size_t span_index = 0;
     std::size_t offset = 0;
     std::span<T> current_span;
 };
 
-class SocketBufferInterface : public SocketBufferIteratorView {
+
+class SocketBufferInterface {
 public:
     using iterator = SocketBufferIterator<uint8_t>;
     using const_iterator = SocketBufferIterator<const uint8_t>;
 
-    ~SocketBufferInterface() override = default;
+    virtual ~SocketBufferInterface() = default;
     virtual size_t consume(size_t n, Dir dir = Dir::Backward) = 0;
     virtual std::span<uint8_t> get_header_payload() const = 0;
     virtual std::span<uint8_t> allocate(std::size_t size) = 0;
@@ -124,15 +120,18 @@ public:
     virtual int get_sequence() const;
     virtual void set_sequence(int s);
 
+    virtual std::vector<std::span<uint8_t>> get_spans() = 0;
+    virtual std::vector<std::span<const uint8_t>> get_spans() const = 0;
+
     iterator begin();
     iterator end();
+    const_iterator begin() const;
+    const_iterator end() const;
     const_iterator cbegin() const;
     const_iterator cend() const;
+    size_t copy_to(std::span<uint8_t> dst) const;
 
 protected:
-    std::span<uint8_t> get_span(int index) const = 0;
-    size_t get_span_count() const = 0;
-
     int sequence = 0;
 };
 
@@ -186,9 +185,8 @@ public:
     std::span<uint8_t> get_header_payload() const override;
     void reclaim() override;
 
-protected:
-    size_t get_span_count() const override;
-    std::span<uint8_t> get_span(int index) const override;
+    std::vector<std::span<uint8_t>> get_spans() override;
+    std::vector<std::span<const uint8_t>> get_spans() const override;
 
 private:
     std::shared_ptr<SocketBuffer::Storage> storage;
@@ -206,9 +204,8 @@ public:
     std::span<uint8_t> allocate(std::size_t size) override;
     void reclaim() override;
 
-protected:
-    std::size_t get_span_count() const override;
-    std::span<uint8_t> get_span(int index) const override;
+    std::vector<std::span<uint8_t>> get_spans() override;
+    std::vector<std::span<const uint8_t>> get_spans() const override;
 
 private:
     std::deque<SocketBuffer> buffer;

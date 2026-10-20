@@ -781,8 +781,7 @@ std::expected<int, std::errc> TcpSession::send_user_data(std::span<uint8_t> user
     {
         const size_t len = std::min(rest.size(), max_capacity);
         auto outbound = app->allocate_socket_buffer();
-        outbound->allocate(len);
-        std::copy_n(rest.begin(), len, outbound->begin());
+        std::copy_n(rest.begin(), len, outbound->allocate(len).begin());
         payloads.push_back(outbound);
 
         rest = rest.subspan(len);

@@ -117,8 +117,7 @@ bool UdpManager::handle_user_socket_operation(UdpSocketUser* user)
             auto buffer_data = entry->user_data.front();
             entry->user_data.pop_front();
 
-            const size_t len = std::min(buffer_data.inbound->size(), user->data.size());
-            std::copy_n(buffer_data.inbound->begin(), len, user->data.begin());
+            const size_t len = buffer_data.inbound->copy_to(user->data);
             user->data = user->data.first(len);
             user->address = buffer_data.address;
         }
@@ -161,8 +160,7 @@ void UdpManager::handle_udp_data_from_network(const UdpSocketHandle& handle, con
         auto waiter = entry->waiters.front();
         entry->waiters.pop_front();
 
-        const size_t len = std::min(inbound->size(), waiter->data.size());
-        std::copy_n(inbound->cbegin(), len, waiter->data.begin());
+        const size_t len = inbound->copy_to(waiter->data);
         waiter->data = waiter->data.first(len);
         waiter->address = client;
 
@@ -192,8 +190,7 @@ std::vector<SocketBuffer> UdpManager::copy_user_data_to_buffer(std::span<uint8_t
         rest = rest.subspan(len);
 
         auto outbound = app->allocate_socket_buffer();
-        outbound->allocate(data.size());
-        std::ranges::copy(data, outbound->begin());
+        std::ranges::copy(data, outbound->allocate(data.size()).begin());
         outbounds.push_back(outbound);
     };
 

@@ -33,9 +33,9 @@ public:
         checksum_maker.input(fakeHeader.get_data());
         for (const auto& outbound: header_with_payload)
         {
-            for (auto it = outbound->cbegin(); it != outbound->cend(); ++it)
+            for (const std::span<const uint8_t> span: outbound->get_spans())
             {
-                checksum_maker.input_u8(*it);
+                checksum_maker.input(span);
             }
         }
 
@@ -50,9 +50,9 @@ public:
 
         Checksum checksum_maker;
         checksum_maker.input(fakeHeader.get_data());
-        for (auto it = header_with_payload->cbegin(); it != header_with_payload->cend(); ++it)
+        for (const std::span<const uint8_t> span: header_with_payload->get_spans())
         {
-            checksum_maker.input_u8(*it);
+            checksum_maker.input(span);
         }
 
         uint16_t checksum2 = checksum_maker.value();

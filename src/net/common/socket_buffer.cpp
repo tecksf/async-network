@@ -4,6 +4,24 @@
 
 namespace coro::net {
 
+namespace {
+
+template<typename Span>
+std::vector<Span> collect_spans(const std::deque<SocketBuffer>& buffers)
+{
+    std::vector<Span> spans;
+    spans.reserve(buffers.size());
+
+    for (const auto& child: buffers)
+    {
+        spans.push_back(child->get_header_payload());
+    }
+
+    return spans;
+}
+
+}
+
 size_t SocketBufferInterface::size() const
 {
     return 0;
@@ -21,22 +39,52 @@ void SocketBufferInterface::set_sequence(int s)
 
 SocketBufferInterface::iterator SocketBufferInterface::begin()
 {
-    return SocketBufferIterator<uint8_t>(this);
+    return iterator(get_spans());
 }
 
 SocketBufferInterface::iterator SocketBufferInterface::end()
 {
-    return SocketBufferIterator<uint8_t>{};
+    return iterator{};
+}
+
+SocketBufferInterface::const_iterator SocketBufferInterface::begin() const
+{
+    return cbegin();
+}
+
+SocketBufferInterface::const_iterator SocketBufferInterface::end() const
+{
+    return cend();
 }
 
 SocketBufferInterface::const_iterator SocketBufferInterface::cbegin() const
 {
-    return SocketBufferIterator<const uint8_t>(this);
+    return const_iterator(get_spans());
 }
 
 SocketBufferInterface::const_iterator SocketBufferInterface::cend() const
 {
-    return SocketBufferIterator<const uint8_t>{};
+    return const_iterator{};
+}
+
+size_t SocketBufferInterface::copy_to(std::span<uint8_t> dst) const
+{
+    size_t copied = 0;
+
+    for (const std::span<const uint8_t> source: get_spans())
+    {
+        if (copied >= dst.size())
+        {
+            break;
+        }
+
+        const size_t len = std::min(source.size(), dst.size() - copied);
+        std::copy_n(source.begin(), len, dst.begin() + copied);
+
+        copied += len;
+    }
+
+    return copied;
 }
 
 SocketBuffer::SocketBuffer()
@@ -193,14 +241,14 @@ void SocketBufferImpl::reclaim()
     payload = std::span(storage->ptr + storage->capacity, 0);
 }
 
-size_t SocketBufferImpl::get_span_count() const
+std::vector<std::span<uint8_t>> SocketBufferImpl::get_spans()
 {
-    return 1;
+    return {payload};
 }
 
-std::span<uint8_t> SocketBufferImpl::get_span(int index) const
+std::vector<std::span<const uint8_t>> SocketBufferImpl::get_spans() const
 {
-    return index == 0 ? payload : std::span<uint8_t>{};
+    return {payload};
 }
 
 void BulkSocketBufferImpl::add(const SocketBuffer& buf)
@@ -260,7 +308,7 @@ size_t BulkSocketBufferImpl::consume(size_t n, Dir dir)
 
 std::span<uint8_t> BulkSocketBufferImpl::get_header_payload() const
 {
-    return get_span(0);
+    return buffer.empty() ? std::span<uint8_t>{} : buffer.front()->get_header_payload();
 }
 
 std::span<uint8_t> BulkSocketBufferImpl::allocate(std::size_t size)
@@ -273,14 +321,14 @@ void BulkSocketBufferImpl::reclaim()
     buffer.clear();
 }
 
-std::size_t BulkSocketBufferImpl::get_span_count() const
+std::vector<std::span<uint8_t>> BulkSocketBufferImpl::get_spans()
 {
-    return buffer.size();
+    return collect_spans<std::span<uint8_t>>(buffer);
 }
 
-std::span<uint8_t> BulkSocketBufferImpl::get_span(int index) const
+std::vector<std::span<const uint8_t>> BulkSocketBufferImpl::get_spans() const
 {
-    return index < buffer.size() ? buffer[index]->get_header_payload() : std::span<uint8_t>{};
+    return collect_spans<std::span<const uint8_t>>(buffer);
 }
 
 }

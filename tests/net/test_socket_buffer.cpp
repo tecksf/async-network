@@ -17,21 +17,18 @@ namespace coro::ut {
 
 std::vector<uint8_t> buffer_bytes(const SocketBufferInterface& buffer)
 {
-    std::vector<uint8_t> bytes;
-    for (auto it = buffer.cbegin(); it != buffer.cend(); ++it)
-    {
-        bytes.push_back(*it);
-    }
+    std::vector<uint8_t> bytes(buffer.size());
+    bytes.resize(buffer.copy_to(bytes));
     return bytes;
 }
 
-std::vector<uint8_t> sequential_bytes(size_t size)
+std::vector<uint8_t> sequential_bytes(size_t size, size_t start = 0)
 {
     std::vector<uint8_t> bytes;
     bytes.reserve(size);
     for (size_t i = 0; i < size; i++)
     {
-        bytes.push_back(static_cast<uint8_t>(i));
+        bytes.push_back(static_cast<uint8_t>(start + i));
     }
     return bytes;
 }
@@ -42,31 +39,6 @@ SocketBuffer make_socket_buffer(uint8_t* data, size_t size, int sequence)
     buffer->set_sequence(sequence);
     return buffer;
 }
-
-class FakeIteratorView : public SocketBufferIteratorView {
-public:
-    void append(std::span<uint8_t> span)
-    {
-        spans.push_back(span);
-    }
-
-    std::span<uint8_t> get_span(int index) const override
-    {
-        if (index < 0 || static_cast<size_t>(index) >= spans.size())
-        {
-            return std::span<uint8_t>{};
-        }
-        return spans[static_cast<size_t>(index)];
-    }
-
-    size_t get_span_count() const override
-    {
-        return spans.size();
-    }
-
-private:
-    std::vector<std::span<uint8_t>> spans;
-};
 
 class SocketBufferTest : public ::testing::Test {
 protected:
@@ -100,22 +72,13 @@ TEST_F(SocketBufferTest, WrapperOneImpl)
 
     ASSERT_TRUE(sut);
     EXPECT_EQ(sut->size(), Size);
-
-    int num = 0;
-    for (auto it = sut->cbegin(); it != sut->cend(); ++it)
-    {
-        EXPECT_EQ(*it, num++);
-    }
+    EXPECT_EQ(buffer_bytes(*sut), sequential_bytes(Size));
 
     sut->consume(5, Dir::Backward);
     sut->consume(3, Dir::Forward);
     EXPECT_EQ(sut->size(), 24);
 
-    num = 5;
-    for (auto it = sut->cbegin(); it != sut->cend(); ++it)
-    {
-        EXPECT_EQ(*it, num++);
-    }
+    EXPECT_EQ(buffer_bytes(*sut), sequential_bytes(24, 5));
 
     auto result = sut->allocate(5);
     EXPECT_EQ(sut->size(), 29);
@@ -232,6 +195,11 @@ TEST_F(SocketBufferTest, IterateAndPostIncrement)
     ASSERT_NE(it, sut->end());
     EXPECT_EQ(*it, 0);
     EXPECT_EQ(it.operator->(), data);
+
+    // The non const iterator writes through to the payload.
+    *it = 0xAB;
+    EXPECT_EQ(data[0], 0xAB);
+    *it = 0;
 
     const auto previous = it++;
     EXPECT_EQ(*previous, 0);
@@ -514,6 +482,13 @@ TEST(BulkSocketBufferImplTest, AddKeepsChildrenSortedBySequence)
 
     const std::vector<uint8_t> expected{0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x22, 0x33, 0x33, 0x33, 0x33};
     EXPECT_EQ(buffer_bytes(bulk), expected);
+
+    std::vector<uint8_t> visited;
+    for (auto it = bulk.cbegin(); it != bulk.cend(); ++it)
+    {
+        visited.push_back(*it);
+    }
+    EXPECT_EQ(visited, expected);
 }
 
 TEST(BulkSocketBufferImplTest, ConsumeBackwardSpansChildren)
@@ -648,21 +623,20 @@ TEST(BulkSocketBufferImplTest, WrapperDelegatesToBulk)
     EXPECT_EQ(cloned->size(), 8u);
 }
 
-TEST(SocketBufferIteratorTest, DefaultIteratorHasNoOwner)
+TEST(SocketBufferIteratorTest, DefaultIteratorHasNoSpans)
 {
     const SocketBufferIterator<uint8_t> it;
 
     EXPECT_EQ(it, SocketBufferIterator<uint8_t>{});
 }
 
-TEST(SocketBufferIteratorTest, ViewWithoutPayloadEqualsEnd)
+TEST(SocketBufferIteratorTest, EmptySpansEqualEnd)
 {
-    FakeIteratorView view;
-    view.append(std::span<uint8_t>{});
-    view.append(std::span<uint8_t>{});
+    std::vector<std::span<uint8_t>> spans;
+    spans.push_back(std::span<uint8_t>{});
+    spans.push_back(std::span<uint8_t>{});
 
-    EXPECT_EQ(view.get_span_count(), 2u);
-    EXPECT_EQ(SocketBufferIterator<uint8_t>(&view), SocketBufferIterator<uint8_t>{});
+    EXPECT_EQ(SocketBufferIterator<uint8_t>(spans), SocketBufferIterator<uint8_t>{});
 }
 
 TEST(SocketBufferIteratorTest, SkipsEmptySpansWhileIterating)
@@ -670,14 +644,14 @@ TEST(SocketBufferIteratorTest, SkipsEmptySpansWhileIterating)
     uint8_t head[2] = {1, 2};
     uint8_t tail[3] = {3, 4, 5};
 
-    FakeIteratorView view;
-    view.append(std::span(head));
-    view.append(std::span<uint8_t>{});
-    view.append(std::span(tail));
-    view.append(std::span<uint8_t>{});
+    std::vector<std::span<uint8_t>> spans;
+    spans.push_back(std::span(head));
+    spans.push_back(std::span<uint8_t>{});
+    spans.push_back(std::span(tail));
+    spans.push_back(std::span<uint8_t>{});
 
     std::vector<uint8_t> visited;
-    for (auto it = SocketBufferIterator<uint8_t>(&view); it != SocketBufferIterator<uint8_t>{}; ++it)
+    for (auto it = SocketBufferIterator<uint8_t>(spans); it != SocketBufferIterator<uint8_t>{}; ++it)
     {
         visited.push_back(*it);
     }
@@ -690,10 +664,10 @@ TEST(SocketBufferIteratorTest, DereferenceAndPostIncrement)
 {
     uint8_t bytes[3] = {10, 20, 30};
 
-    FakeIteratorView view;
-    view.append(std::span(bytes));
+    std::vector<std::span<uint8_t>> spans;
+    spans.push_back(std::span(bytes));
 
-    auto it = SocketBufferIterator<uint8_t>(&view);
+    auto it = SocketBufferIterator<uint8_t>(spans);
 
     EXPECT_EQ(*it, 10);
     EXPECT_EQ(it.operator->(), bytes);
@@ -720,12 +694,18 @@ TEST(SocketBufferIteratorTest, ConstIteratorIsReadOnly)
         std::bidirectional_iterator_tag>);
     static_assert(std::is_same_v<decltype(*std::declval<const SocketBufferIterator<const uint8_t>&>()), const uint8_t&>);
 
+    // The writable and the read-only iterators own different span lists.
+    static_assert(std::is_constructible_v<SocketBufferIterator<uint8_t>, std::vector<std::span<uint8_t>>>);
+    static_assert(std::is_constructible_v<SocketBufferIterator<const uint8_t>, std::vector<std::span<const uint8_t>>>);
+    static_assert(not std::is_constructible_v<SocketBufferIterator<uint8_t>, std::vector<std::span<const uint8_t>>>);
+    static_assert(not std::is_constructible_v<SocketBufferIterator<const uint8_t>, std::vector<std::span<uint8_t>>>);
+
     uint8_t bytes[2] = {7, 8};
 
-    FakeIteratorView view;
-    view.append(std::span(bytes));
+    std::vector<std::span<const uint8_t>> spans;
+    spans.push_back(std::span(bytes));
 
-    auto it = SocketBufferIterator<const uint8_t>(&view);
+    auto it = SocketBufferIterator<const uint8_t>(spans);
 
     EXPECT_EQ(*it, 7);
     EXPECT_EQ(it.operator->(), bytes);
@@ -734,6 +714,49 @@ TEST(SocketBufferIteratorTest, ConstIteratorIsReadOnly)
     EXPECT_EQ(*it, 8);
     ++it;
     EXPECT_EQ(it, SocketBufferIterator<const uint8_t>{});
+}
+
+TEST(SocketBufferCopyToTest, CopiesPayloadUpToSpanSize)
+{
+    uint8_t data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    auto buffer = SocketBuffer(std::make_shared<SocketBufferImpl>(data, 8, 8));
+
+    uint8_t dst[8] = {};
+    EXPECT_EQ(buffer->copy_to(std::span<uint8_t>(dst)), 8u);
+    EXPECT_THAT(dst, ElementsAre(0, 1, 2, 3, 4, 5, 6, 7));
+
+    // A smaller destination truncates the copy.
+    uint8_t small[3] = {};
+    EXPECT_EQ(buffer->copy_to(std::span<uint8_t>(small)), 3u);
+    EXPECT_THAT(small, ElementsAre(0, 1, 2));
+
+    // A bigger destination stops at the end of the payload.
+    uint8_t big[10] = {};
+    EXPECT_EQ(buffer->copy_to(std::span<uint8_t>(big)), 8u);
+    EXPECT_THAT(big, ElementsAre(0, 1, 2, 3, 4, 5, 6, 7, 0, 0));
+
+    EXPECT_EQ(buffer->copy_to(std::span<uint8_t>{}), 0u);
+}
+
+TEST(SocketBufferCopyToTest, WalksEverySpanOfBulkBuffer)
+{
+    uint8_t front[3];
+    uint8_t back[2];
+    std::fill_n(front, 3, 0x11);
+    std::fill_n(back, 2, 0x22);
+
+    BulkSocketBufferImpl bulk;
+    bulk.add(make_socket_buffer(front, 3, 1));
+    bulk.add(make_socket_buffer(back, 2, 2));
+
+    uint8_t dst[8] = {};
+    EXPECT_EQ(bulk.copy_to(std::span<uint8_t>(dst)), 5u);
+    EXPECT_THAT(dst, ElementsAre(0x11, 0x11, 0x11, 0x22, 0x22, 0, 0, 0));
+
+    // Destination smaller than the payload truncates the copy.
+    std::fill_n(dst, 8, 0);
+    EXPECT_EQ(bulk.copy_to(std::span<uint8_t>(dst, 2)), 2u);
+    EXPECT_THAT(dst, ElementsAre(0x11, 0x11, 0, 0, 0, 0, 0, 0));
 }
 
 }
