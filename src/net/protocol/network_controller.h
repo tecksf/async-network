@@ -8,6 +8,7 @@
 #include "network_interface.h"
 #include <socket/socket.h>
 #include <common/types.h>
+#include <memory>
 #include <common/config.h>
 #include <common/ring_buffe.hpp>
 #include <protocol/capability/physical.h>
@@ -45,7 +46,6 @@ public:
     bool subscribe_mac_updating_event(Context* ctx) override;
     int allocate_fd() override;
     void sumit_task(std::coroutine_handle<> h) override;
-    SocketBuffer allocate_socket_buffer() override;
     link::RetrieveMacAwaiter retrieve_mac_address(const IpAddress& ip) override;
     co_async<> on_ethernet_frame_received(SocketBuffer inbound) const override;
     co_async<> on_arp_packet_received(const SocketBuffer& inbound) const override;
@@ -61,10 +61,10 @@ public:
 
 private:
     using Block = uint8_t [MAX_BLOCK_SIZE];
-    RingBuffer<Block, 128> inbound_buffer;
-    RingBuffer<Block, 128> outbound_buffer;
+    std::shared_ptr<RingBuffer<Block>> inbound_buffer;
 
     void create_managers();
+    void create_inbound_buffer();
 
     NetConfig config;
 

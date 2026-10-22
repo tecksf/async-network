@@ -23,9 +23,13 @@ constexpr int UDP_HEADER_SIZE = 8;
 constexpr int ICMP_HEADER_SIZE = 4;
 constexpr int ARP_HEADER_SIZE = 28;
 
-// Compile time capacity of one frame buffer slot. The runtime block size is read from
-// the configuration file and must not exceed this value, see NetConfig::block_size.
-constexpr int MAX_BLOCK_SIZE = 1536;
+
+constexpr int MAX_ETHERNET_FRAME_SIZE = 1518;
+constexpr int MAX_VLAN_ETHERNET_FRAME_SIZE = 1522;
+constexpr int MAX_BLOCK_SIZE = (MAX_VLAN_ETHERNET_FRAME_SIZE + 63) & ~63;
+
+static_assert(MAX_BLOCK_SIZE >= MAX_VLAN_ETHERNET_FRAME_SIZE, "one slot must hold a maximum sized Ethernet frame");
+static_assert(MAX_BLOCK_SIZE % 64 == 0, "every block must be aligned to the 64 byte cache line");
 
 }
 

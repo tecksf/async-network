@@ -30,6 +30,11 @@ TcpSession::~TcpSession()
     logger->debug("===> TCP session [{0}] destroyed", session_id);
 }
 
+SocketBuffer TcpSession::allocate_socket_buffer()
+{
+    return outbound_pool->allocate_socket_buffer();
+}
+
 TcpState TcpSession::get_state() const
 {
     return state.load(std::memory_order_acquire);
@@ -392,7 +397,7 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
 
     if (need_reply)
     {
-        auto outbound = app->allocate_socket_buffer();
+        auto outbound = allocate_socket_buffer();
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
     }
 
@@ -411,7 +416,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
         receive_user_data(header, payload);
     }
 
-    auto outbound = app->allocate_socket_buffer();
+    auto outbound = allocate_socket_buffer();
 
     if (header.contains(TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK))
     {
@@ -465,7 +470,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
 
     if (need_reply)
     {
-        auto outbound = app->allocate_socket_buffer();
+        auto outbound = allocate_socket_buffer();
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
     }
 
@@ -583,7 +588,7 @@ bool TcpSession::verify_reset_sequence(uint32_t seq_num)
     {
         logger->warn("{} received in-window RST (seq: {}, expect: {}), sending challenge ACK", get_string_state(), seq_num, expected);
 
-        auto outbound = app->allocate_socket_buffer();
+        auto outbound = allocate_socket_buffer();
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
         return false;
     }
@@ -602,7 +607,7 @@ std::optional<TcpStateTransition> TcpSession::terminate_session(std::errc ec, bo
     if (send_reset)
     {
         logger->warn("===> TCP session [{0}] is reset by local side, State: {1} --> Closed", session_id, get_string_state());
-        auto outbound = app->allocate_socket_buffer();
+        auto outbound = allocate_socket_buffer();
         SocketBuffer frame = compose_tcp_segment(outbound, TcpSegment::FLAG_RST | TcpSegment::FLAG_ACK,
                                                  sequence_number, nullptr);
         TcpContext context{};
@@ -686,7 +691,7 @@ void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, con
 
 void TcpSession::send_window_update()
 {
-    auto outbound = app->allocate_socket_buffer();
+    auto outbound = allocate_socket_buffer();
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
     logger->debug("===> TCP session [{0}] window update sent, available window: {1}", session_id,
                   receive_window.available_window());
@@ -818,7 +823,7 @@ std::expected<int, std::errc> TcpSession::send_user_data(std::span<uint8_t> user
         }
 
         const size_t len = std::min(rest.size(), max_capacity);
-        auto outbound = app->allocate_socket_buffer();
+        auto outbound = allocate_socket_buffer();
         if (not outbound)
         {
             break;
@@ -914,7 +919,7 @@ void TcpSession::on_retransmission_failed()
 
 void TcpSession::send_fin_segment()
 {
-    auto outbound = app->allocate_socket_buffer();
+    auto outbound = allocate_socket_buffer();
     send_tcp_segment(outbound, TcpSegment::FLAG_FIN | TcpSegment::FLAG_ACK);
     sequence_number += 1;
 }

@@ -74,6 +74,11 @@ NetworkController::~NetworkController()
 {
 }
 
+void NetworkController::create_inbound_buffer()
+{
+    inbound_buffer = std::make_shared<RingBuffer<Block>>(static_cast<std::size_t>(config.receive_slots));
+}
+
 void NetworkController::create_managers()
 {
     link_manager = std::make_unique<link::LinkManager>(this, this, this, logger, config.link);
@@ -102,6 +107,7 @@ bool NetworkController::apply_config(const NetConfig& new_config)
         return false;
     }
 
+    create_inbound_buffer();
     create_managers();
 
     logger->info("[Network] interface={}, ip={}, mac={}, block_size={}, ethernet_mtu={}, tcp_window={}, tcp_mss={}",
@@ -201,7 +207,7 @@ int NetworkController::open_capture_socket(uint16_t fanout_id, int ifindex)
     }
 
     int send_buffer_size = 4 * 1024 * 1024;
-    (void)::setsockopt(capture_fd, SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size));
+    (void) ::setsockopt(capture_fd, SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size));
 
     int err = 0;
     int one = 1;
@@ -294,13 +300,13 @@ bool NetworkController::register_tcp_connect_operation(TcpSocketUser* user, cons
 
 std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
 {
-    Block* block = inbound_buffer.allocate();
+    Block* block = inbound_buffer->allocate();
     if (block == nullptr)
     {
         return nullptr;
     }
 
-    auto recycle = [pool = &inbound_buffer](const void* ptr) {
+    auto recycle = [pool = inbound_buffer](const void* ptr) {
         pool->deallocate(static_cast<const Block*>(ptr));
     };
 
@@ -361,34 +367,6 @@ int NetworkController::allocate_fd()
 {
     int fd = fd_counter.fetch_add(1);
     return fd;
-}
-
-SocketBuffer NetworkController::allocate_socket_buffer()
-{
-    Block* block = outbound_buffer.allocate();
-    if (block != nullptr)
-    {
-        auto recycle = [pool = &outbound_buffer](const void* ptr) {
-            pool->deallocate(static_cast<const Block*>(ptr));
-        };
-
-        SocketBuffer outbound(
-            std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), config.block_size, std::nullopt, recycle)
-        );
-        return outbound;
-    }
-
-    auto* heap = new (std::nothrow) Block;
-    if (heap == nullptr)
-    {
-        return SocketBuffer{};
-    }
-
-    SocketBuffer outbound(std::make_shared<SocketBufferImpl>(
-        reinterpret_cast<uint8_t*>(heap), config.block_size, std::nullopt,
-        [](const void* ptr) { delete[] static_cast<const Block*>(ptr); }
-    ));
-    return outbound;
 }
 
 void NetworkController::sumit_task(std::coroutine_handle<> h)

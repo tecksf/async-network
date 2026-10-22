@@ -19,6 +19,7 @@
 #include <protocol/capability/application.h>
 #include <protocol/capability/transport.h>
 #include <common/config.h>
+#include <common/buffer_pool.h>
 #include <socket/socket.h>
 #include "protocol/header/tcp.hpp"
 #include "tcp_send_window.h"
@@ -121,6 +122,8 @@ public:
     TcpSessionResult try_to_add_read_waiter(TcpSocketUser* user);
 
 protected:
+    [[nodiscard]] SocketBuffer allocate_socket_buffer();
+
     TCP_LOCK_REQUIRED std::optional<TcpStateTransition> switch_to(TcpState next_state);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, const TcpOptionSet& options);
@@ -181,6 +184,8 @@ protected:
     uint32_t sequence_number;
 
     bool read_shutdown = false;
+
+    std::shared_ptr<BufferPool> outbound_pool;
 
     // MSS advertised by the peer (already clamped): the handshake thread writes it and the application
     // thread reads it, so an atomic keeps both sides free of the session lock.

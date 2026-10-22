@@ -18,7 +18,6 @@ class ApplicationService : public Service {
 public:
     ~ApplicationService() override = default;
     virtual int allocate_fd() = 0;
-    virtual SocketBuffer allocate_socket_buffer() = 0;
 
     template<typename T>
     void sumit_task(AsyncTask<T>&& task)

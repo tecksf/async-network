@@ -10,6 +10,7 @@
 #include <protocol/capability/internet.h>
 #include <protocol/capability/transport.h>
 #include <common/config.h>
+#include <common/buffer_pool.h>
 #include <socket/socket.h>
 
 namespace coro::net::trans {
@@ -38,7 +39,8 @@ public:
 
 private:
     void handle_udp_data_from_network(const UdpSocketHandle& handle, const SocketAddress& client, const SocketBuffer& inbound);
-    std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data) const;
+    std::vector<SocketBuffer> copy_user_data_to_buffer(std::span<uint8_t> user_data);
+    [[nodiscard]] SocketBuffer allocate_socket_buffer();
 
     app::ApplicationService* app;
     trans::TransportService* trans;
@@ -47,6 +49,7 @@ private:
     std::shared_ptr<spdlog::logger> logger;
 
     const UdpConfig config;
+    std::shared_ptr<BufferPool> outbound_pool;
 
     std::mutex socket_mutex;
     std::map<UdpSocketHandle, std::shared_ptr<SocketQueueEntry>> sockets;

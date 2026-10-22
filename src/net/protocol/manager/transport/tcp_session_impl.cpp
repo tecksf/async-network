@@ -93,12 +93,13 @@ namespace coro::net::trans {
 TcpConnectSession::TcpConnectSession(TcpManager* manager, TcpState s, const TcpSocketHandle& handle)
     : TcpSession(manager, s, handle.local, handle.remote)
 {
+    outbound_pool = std::make_shared<BufferPool>(static_cast<std::size_t>(tcp_config.send_slots));
     if (state == TcpState::SynSent)
     {
         std::lock_guard lock(session_mutex);
         sequence_number = rand_uint<uint32_t>() & 0xffff;
 
-        auto outbound = app->allocate_socket_buffer();
+        auto outbound = allocate_socket_buffer();
         const TcpOptionSet options{.mss = static_cast<uint16_t>(tcp_config.mss)};
         send_tcp_segment(outbound, TcpSegment::FLAG_SYN, options);
 

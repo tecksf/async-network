@@ -49,6 +49,9 @@ struct Ipv4Config {
 struct UdpConfig {
     // Derived from LinkConfig::ethernet_mtu during NetConfig::normalize().
     int mtu = 1460;
+    // Number of blocks the outbound frame cache of the UDP manager holds; the memory is
+    // send_slots * MAX_BLOCK_SIZE bytes.
+    int send_slots = 138;
 };
 
 // Tunables of the TCP protocol.
@@ -94,6 +97,10 @@ struct TcpConfig {
     // Validate the checksum of an inbound segment. Disabling it is only useful for debugging,
     // a corrupted segment is then handed to the session state machine.
     bool checksum_check = true;
+
+    // Number of blocks the outbound frame cache of one session holds; the memory is
+    // send_slots * MAX_BLOCK_SIZE bytes.
+    int send_slots = 128;
 };
 
 // Whole runtime configuration of the network stack. Values come from a key=value
@@ -102,8 +109,12 @@ struct NetConfig {
     // Default configuration path, used when main() does not pass config=<path>.
     static constexpr const char* DefaultPath = "config/network.conf";
 
-    // Size of the buffers handed to the protocol stack, must fit MAX_BLOCK_SIZE.
-    int block_size = 1536;
+    // Size of the receive buffer handed to the protocol stack in one recvfrom() call, at most one
+    // block (MAX_BLOCK_SIZE bytes).
+    int block_size = MAX_BLOCK_SIZE;
+    // Number of blocks the receive frame cache holds; it is shared by all sessions and its memory is
+    // receive_slots * MAX_BLOCK_SIZE bytes.
+    int receive_slots = 138;
     std::string interface_name = "eth0";
     std::string host_ip;
 

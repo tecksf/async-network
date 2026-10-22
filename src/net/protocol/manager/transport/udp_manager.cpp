@@ -5,12 +5,18 @@ namespace coro::net::trans {
 
 UdpManager::UdpManager(app::ApplicationService* app, inet::InternetService* inet, trans::TransportService* trans,
                        std::shared_ptr<spdlog::logger> logger, const UdpConfig& config)
-    : app(app), trans(trans), inet(inet), logger(logger), config(config)
+    : app(app), trans(trans), inet(inet), logger(logger), config(config),
+      outbound_pool(std::make_shared<BufferPool>(static_cast<std::size_t>(config.send_slots)))
 {
 }
 
 UdpManager::~UdpManager()
 {
+}
+
+SocketBuffer UdpManager::allocate_socket_buffer()
+{
+    return outbound_pool->allocate_socket_buffer();
 }
 
 co_async<> UdpManager::on_udp_segment_received(const SocketBuffer& inbound, const UdpContext& ctx)
@@ -172,7 +178,7 @@ void UdpManager::handle_udp_data_from_network(const UdpSocketHandle& handle, con
     }
 }
 
-std::vector<SocketBuffer> UdpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data) const
+std::vector<SocketBuffer> UdpManager::copy_user_data_to_buffer(std::span<uint8_t> user_data)
 {
     const int first_capacity = align_down_8(config.mtu - static_cast<int>(UdpSegment::HeaderSize));
     const int max_capacity = align_down_8(config.mtu);
@@ -183,15 +189,21 @@ std::vector<SocketBuffer> UdpManager::copy_user_data_to_buffer(std::span<uint8_t
     auto append_fragment = [&](size_t len) {
         if (len == 0)
         {
-            return;
+            return false;
         }
 
         std::span<uint8_t> data = rest.first(len);
-        rest = rest.subspan(len);
 
-        auto outbound = app->allocate_socket_buffer();
+        auto outbound = allocate_socket_buffer();
+        if (not outbound)
+        {
+            return false;
+        }
+
         std::ranges::copy(data, outbound->allocate(data.size()).begin());
         outbounds.push_back(outbound);
+        rest = rest.subspan(len);
+        return true;
     };
 
     if (rest.size() <= static_cast<size_t>(config.mtu - static_cast<int>(UdpSegment::HeaderSize)))
@@ -200,13 +212,20 @@ std::vector<SocketBuffer> UdpManager::copy_user_data_to_buffer(std::span<uint8_t
         return outbounds;
     }
 
-    append_fragment(first_capacity);
+    if (not append_fragment(first_capacity))
+    {
+        return outbounds;
+    }
+
     while (rest.size() > max_capacity)
     {
-        append_fragment(max_capacity);
+        if (not append_fragment(max_capacity))
+        {
+            return outbounds;
+        }
     }
-    append_fragment(rest.size());
 
+    append_fragment(rest.size());
     return outbounds;
 }
 

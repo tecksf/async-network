@@ -10,6 +10,10 @@ namespace coro::net {
 
 namespace {
 
+// Upper bound of one frame cache, in blocks (64 MiB of frame memory). Frame caches are preallocated,
+// so a larger request is a configuration error rather than a tuning value.
+constexpr int MaxCacheSlots = 64 * 1024 * 1024 / MAX_BLOCK_SIZE;
+
 std::string_view trim(std::string_view text)
 {
     const auto first = text.find_first_not_of(" \t\r\n");
@@ -241,6 +245,11 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
         return read_int(block_size, ETHERNET_HEADER_SIZE, MAX_BLOCK_SIZE);
     }
 
+    if (key == "receive_slots" or key == "link.receive_slots")
+    {
+        return read_int(receive_slots, 1, MaxCacheSlots);
+    }
+
     if (key.starts_with("log.runtime."))
     {
         return apply_logger_key(log.runtime, key.substr(std::string_view("log.runtime.").size()));
@@ -290,6 +299,16 @@ bool NetConfig::apply(std::string_view key, std::string_view value, std::vector<
     if (key == "ipv4.checksum_check" or key == "ipv4_checksum_check")
     {
         return read_bool(ipv4.checksum_check);
+    }
+
+    if (key == "udp.send_slots" or key == "udp_send_slots")
+    {
+        return read_int(udp.send_slots, 1, MaxCacheSlots);
+    }
+
+    if (key == "tcp.send_slots" or key == "tcp_send_slots")
+    {
+        return read_int(tcp.send_slots, 1, MaxCacheSlots);
     }
 
     if (key == "tcp.window_size" or key == "tcp_window_size")
@@ -531,6 +550,9 @@ void NetConfig::normalize()
     ipv4.arp_retry = std::max(ipv4.arp_retry, 1);
 
     block_size = std::clamp(block_size, link.ethernet_mtu + ETHERNET_HEADER_SIZE, MAX_BLOCK_SIZE);
+    receive_slots = std::clamp(receive_slots, 1, MaxCacheSlots);
+    udp.send_slots = std::clamp(udp.send_slots, 1, MaxCacheSlots);
+    tcp.send_slots = std::clamp(tcp.send_slots, 1, MaxCacheSlots);
 
     const auto clamp_logger = [](utils::LoggerSettings& logger) {
         logger.queue_size = std::clamp<std::size_t>(logger.queue_size, 1, 1024 * 1024);
