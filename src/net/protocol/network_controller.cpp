@@ -10,7 +10,9 @@
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef PACKET_FANOUT_FLAG_IGNORE_OUTGOING
@@ -160,8 +162,24 @@ void NetworkController::deliver_message(uint8_t* frame, size_t length)
     std::memcpy(addr.sll_addr, frame, ETH_ALEN);
     std::memcpy(&addr.sll_protocol, frame + 12, sizeof(addr.sll_protocol));
 
-    const ssize_t sent = ::sendto(capture_fd, frame, length, 0,
-                                  reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    ssize_t sent = -1;
+    for (int attempt = 0; attempt < 128; ++attempt)
+    {
+        sent = ::sendto(capture_fd, frame, length, 0,
+                        reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+        if (sent >= 0)
+        {
+            break;
+        }
+
+        if (errno != EAGAIN and errno != EWOULDBLOCK and errno != ENOBUFS and errno != EINTR)
+        {
+            break;
+        }
+
+        std::this_thread::yield();
+    }
+
     if (sent < 0)
     {
         logger->error("sendto failed, size={}, errno={} ({})", length, errno, std::strerror(errno));
@@ -181,6 +199,9 @@ int NetworkController::open_capture_socket(uint16_t fanout_id, int ifindex)
     {
         return -errno;
     }
+
+    int send_buffer_size = 4 * 1024 * 1024;
+    (void)::setsockopt(capture_fd, SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size));
 
     int err = 0;
     int one = 1;
@@ -274,6 +295,11 @@ bool NetworkController::register_tcp_connect_operation(TcpSocketUser* user, cons
 std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
 {
     Block* block = inbound_buffer.allocate();
+    if (block == nullptr)
+    {
+        return nullptr;
+    }
+
     auto recycle = [pool = &inbound_buffer](const void* ptr) {
         pool->deallocate(static_cast<const Block*>(ptr));
     };
@@ -340,13 +366,28 @@ int NetworkController::allocate_fd()
 SocketBuffer NetworkController::allocate_socket_buffer()
 {
     Block* block = outbound_buffer.allocate();
-    auto recycle = [pool = &outbound_buffer](const void* ptr) {
-        pool->deallocate(static_cast<const Block*>(ptr));
-    };
+    if (block != nullptr)
+    {
+        auto recycle = [pool = &outbound_buffer](const void* ptr) {
+            pool->deallocate(static_cast<const Block*>(ptr));
+        };
 
-    SocketBuffer outbound(
-        std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), config.block_size, std::nullopt, recycle)
-    );
+        SocketBuffer outbound(
+            std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), config.block_size, std::nullopt, recycle)
+        );
+        return outbound;
+    }
+
+    auto* heap = new (std::nothrow) Block;
+    if (heap == nullptr)
+    {
+        return SocketBuffer{};
+    }
+
+    SocketBuffer outbound(std::make_shared<SocketBufferImpl>(
+        reinterpret_cast<uint8_t*>(heap), config.block_size, std::nullopt,
+        [](const void* ptr) { delete[] static_cast<const Block*>(ptr); }
+    ));
     return outbound;
 }
 

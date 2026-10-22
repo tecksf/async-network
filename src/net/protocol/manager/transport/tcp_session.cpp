@@ -17,7 +17,8 @@ TcpSession::TcpSession(TcpManager* manager, TcpState s, const SocketAddress& loc
       local(local),
       remote(remote),
       peer_mss(static_cast<uint32_t>(manager->get_config().min_mss)),
-      send_window(manager->get_app(), manager->get_trans(), this, remote.ip, logger, manager->get_config()),
+      send_window(std::make_shared<TcpSendWindow>(manager->get_app(), manager->get_trans(), remote.ip, logger,
+                                                  manager->get_config())),
       receive_window(logger, static_cast<uint32_t>(manager->get_config().window_size))
 {
     state = s;
@@ -178,8 +179,8 @@ TcpSessionResult TcpSession::process_tcp_segment(const TcpSegment& header, const
 
     if (header.is_ack())
     {
-        send_window.update_peer_window(header.get_window_size(), header.get_sequence_number(), header.get_ack_number());
-        send_window.acknowledge(header.get_ack_number());
+        send_window->update_peer_window(header.get_window_size(), header.get_sequence_number(), header.get_ack_number());
+        send_window->acknowledge(header.get_ack_number());
         // The window may have just closed: if data is still queued, start zero-window probing as a fallback
         start_persist_probe();
     }
@@ -245,6 +246,7 @@ std::optional<TcpStateTransition> TcpSession::switch_to(TcpState next_state)
     }
     if (next_state == TcpState::Closed)
     {
+        send_window->cancel_transmit();
         session_events->on_session_closed(shared_from_this());
     }
 
@@ -601,7 +603,12 @@ std::optional<TcpStateTransition> TcpSession::terminate_session(std::errc ec, bo
     {
         logger->warn("===> TCP session [{0}] is reset by local side, State: {1} --> Closed", session_id, get_string_state());
         auto outbound = app->allocate_socket_buffer();
-        send_tcp_segment(outbound, TcpSegment::FLAG_RST | TcpSegment::FLAG_ACK);
+        SocketBuffer frame = compose_tcp_segment(outbound, TcpSegment::FLAG_RST | TcpSegment::FLAG_ACK,
+                                                 sequence_number, nullptr);
+        TcpContext context{};
+        context.ip = remote.ip;
+        context.protocol = Protocol::TCP;
+        app->sumit_task(trans->async_send_tcp_segment(frame, context));
     }
     else
     {
@@ -609,7 +616,7 @@ std::optional<TcpStateTransition> TcpSession::terminate_session(std::errc ec, bo
     }
 
     stop_persist_probe();
-    send_window.cancel_pending_segments();
+    send_window->cancel_transmit();
 
     auto transition = switch_to(TcpState::Closed);
     if (transition)
@@ -674,7 +681,7 @@ void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag, con
     // know how long the payload is, so get_sequence_len() is always 0 and the segment would be sent as a
     // pure ACK - occupying no window and never being retransmitted.
     TcpSegment segment(outbound->get_header_payload());
-    send_window.push_outbound(segment, outbound);
+    send_window->push_outbound(segment, outbound);
 }
 
 void TcpSession::send_window_update()
@@ -685,9 +692,14 @@ void TcpSession::send_window_update()
                   receive_window.available_window());
 }
 
+void TcpSession::activate_transmit()
+{
+    send_window->bind_events(weak_from_this());
+}
+
 void TcpSession::start_persist_probe()
 {
-    if (persist_cancelled or not is_writable() or not send_window.probe_target().has_value())
+    if (persist_cancelled or is_closed() or not send_window->probe_target().has_value())
     {
         return;
     }
@@ -726,7 +738,7 @@ co_async<> TcpSession::persist_probe_timer(std::shared_ptr<TcpSession> session,
         //
         {
             std::lock_guard lock(session->session_mutex);
-            blocked = session->is_writable() and session->send_window.probe_target().has_value();
+            blocked = not session->is_closed() and session->send_window->probe_target().has_value();
             if (blocked)
             {
                 session->send_persist_probe(SocketBuffer::make_outbound_view(probe_buffer, probe_size));
@@ -750,7 +762,7 @@ co_async<> TcpSession::persist_probe_timer(std::shared_ptr<TcpSession> session,
 
 void TcpSession::send_persist_probe(const SocketBuffer& payload)
 {
-    const auto target = send_window.probe_target();
+    const auto target = send_window->probe_target();
     if (not target.has_value())
     {
         return;
@@ -775,7 +787,7 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
     TcpContext context{};
     context.ip = remote.ip;
     context.protocol = Protocol::TCP;
-    send_window.note_probe_sent(target->sequence_number);
+    send_window->note_probe_sent(target->sequence_number);
 
     app->sumit_task(trans->async_send_tcp_segment(outbound, context));
 
@@ -784,19 +796,43 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
 
 std::expected<int, std::errc> TcpSession::send_user_data(std::span<uint8_t> user_data)
 {
+    std::lock_guard lock(session_mutex);
+
+    if (const std::errc reason = writability(); reason != std::errc{})
+    {
+        return std::unexpected(reason);
+    }
+
     std::vector<SocketBuffer> payloads;
     const size_t max_mtu_payload = static_cast<size_t>(tcp_config.mtu) - TcpSegment::HeaderSize;
     const size_t max_capacity = std::clamp<size_t>(get_send_mss(), 1, max_mtu_payload);
 
+    const size_t max_queued = std::max<size_t>(static_cast<size_t>(tcp_config.window_size) * 2, max_capacity);
+
     std::span<uint8_t> rest = user_data;
     while (not rest.empty())
     {
+        if (send_window->queued_bytes() >= max_queued)
+        {
+            break;
+        }
+
         const size_t len = std::min(rest.size(), max_capacity);
         auto outbound = app->allocate_socket_buffer();
+        if (not outbound)
+        {
+            break;
+        }
+
         std::copy_n(rest.begin(), len, outbound->allocate(len).begin());
         payloads.push_back(outbound);
 
         rest = rest.subspan(len);
+    }
+
+    if (payloads.empty())
+    {
+        return 0;
     }
 
     return send_user_data(payloads);
@@ -804,21 +840,6 @@ std::expected<int, std::errc> TcpSession::send_user_data(std::span<uint8_t> user
 
 std::expected<int, std::errc> TcpSession::send_user_data(const std::vector<SocketBuffer>& payloads)
 {
-    std::lock_guard lock(session_mutex);
-
-    if (not is_writable())
-    {
-        auto is_fin_sent = [](TcpState state)-> bool {
-            return state == TcpState::FinWait1 or state == TcpState::FinWait2 or state == TcpState::Closing or
-                   state == TcpState::LastAck or state == TcpState::TimeWait;
-        };
-
-        const std::errc reason = is_fin_sent(get_state())
-                                     ? std::errc::broken_pipe
-                                     : (closed_reason != std::errc{} ? closed_reason : std::errc::not_connected);
-        return std::unexpected(reason);
-    }
-
     int bytes_sent = 0;
     for (auto payload: payloads)
     {
@@ -829,6 +850,23 @@ std::expected<int, std::errc> TcpSession::send_user_data(const std::vector<Socke
     start_persist_probe();
 
     return bytes_sent;
+}
+
+std::errc TcpSession::writability() const
+{
+    if (is_writable())
+    {
+        return std::errc{};
+    }
+
+    auto is_fin_sent = [](TcpState state)-> bool {
+        return state == TcpState::FinWait1 or state == TcpState::FinWait2 or state == TcpState::Closing or
+               state == TcpState::LastAck or state == TcpState::TimeWait;
+    };
+
+    return is_fin_sent(get_state())
+               ? std::errc::broken_pipe
+               : (closed_reason != std::errc{} ? closed_reason : std::errc::not_connected);
 }
 
 void TcpSession::receive_user_data(const TcpSegment& header, const SocketBuffer& payload)
@@ -941,7 +979,7 @@ std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
             next_state = TcpState::FinWait1;
             break;
         case TcpState::SynSent:
-            send_window.cancel_pending_segments();
+            send_window->cancel_transmit();
             next_state = TcpState::Closed;
             break;
         case TcpState::Established:

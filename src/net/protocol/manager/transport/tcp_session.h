@@ -112,11 +112,12 @@ public:
     TcpSocketHandle get_socket_handle() const;
     uint32_t get_send_mss() const;
 
+    void activate_transmit();
+
     [[nodiscard]] TcpSessionResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
     std::optional<TcpStateTransition> close(std::errc ec = std::errc{});
     std::expected<void, std::errc> shutdown(ShutdownHow how);
     std::expected<int, std::errc> send_user_data(std::span<uint8_t> user_data);
-    std::expected<int, std::errc> send_user_data(const std::vector<SocketBuffer>& payloads);
     TcpSessionResult try_to_add_read_waiter(TcpSocketUser* user);
 
 protected:
@@ -141,6 +142,9 @@ protected:
     static co_async<> time_wait_timer(std::shared_ptr<TcpSession> session, std::shared_ptr<std::atomic_bool> token);
     void on_retransmission_failed() override;
     TCP_LOCK_REQUIRED TcpSocketUser* take_waiter();
+
+    std::expected<int, std::errc> send_user_data(const std::vector<SocketBuffer>& payloads);
+    TCP_LOCK_REQUIRED std::errc writability() const;
 
 protected:
     TcpState process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload);
@@ -184,7 +188,7 @@ protected:
 
     std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
     std::shared_ptr<std::atomic<bool>> persist_cancelled = nullptr;
-    TcpSendWindow send_window;
+    std::shared_ptr<TcpSendWindow> send_window;
     TcpReceiveWindow receive_window;
     std::errc closed_reason = std::errc{};
     TcpSocketUser* waiter = nullptr;

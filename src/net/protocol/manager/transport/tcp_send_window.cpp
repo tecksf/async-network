@@ -6,11 +6,10 @@
 
 namespace coro::net::trans {
 
-TcpSendWindow::TcpSendWindow(app::ApplicationService* app, trans::TransportService* trans, TcpSendEvents* events,
-                             const IpAddress& remote, std::shared_ptr<spdlog::logger> logger, const TcpConfig& config)
+TcpSendWindow::TcpSendWindow(app::ApplicationService* app, trans::TransportService* trans, const IpAddress& remote,
+                             std::shared_ptr<spdlog::logger> logger, const TcpConfig& config)
     : app(app), trans(trans), logger(logger),
       destination_ip(remote),
-      events(events),
       max_retransmissions(config.max_retransmissions),
       initial_retransmission_timeout(config.initial_rto_ms),
       max_retransmission_timeout(config.max_rto_ms),
@@ -19,7 +18,19 @@ TcpSendWindow::TcpSendWindow(app::ApplicationService* app, trans::TransportServi
 {
 }
 
-TcpSendWindow::~TcpSendWindow() {
+TcpSendWindow::~TcpSendWindow()
+{
+}
+
+void TcpSendWindow::cancel_transmit()
+{
+    transmit_cancelled.store(true, std::memory_order_release);
+
+    cancel_pending_segments();
+
+    std::lock_guard lock(tx_queue_mutex);
+    tx_queue.clear();
+    tx_pump_running = false;
 }
 
 void TcpSendWindow::push_outbound(const TcpSegment& segment, const SocketBuffer& outbound)
@@ -37,10 +48,7 @@ void TcpSendWindow::push_outbound(const TcpSegment& segment, const SocketBuffer&
 
     if (seq_len == 0)
     {
-        TcpContext context;
-        context.ip = destination_ip;
-        context.protocol = Protocol::TCP;
-        app->sumit_task(trans->async_send_tcp_segment(outbound, context));
+        push_outbound_into_tx_queue(outbound);
         return;
     }
 
@@ -55,6 +63,71 @@ void TcpSendWindow::push_outbound(const TcpSegment& segment, const SocketBuffer&
     pending.push_back(entry);
 
     dispatch_pending_outbounds();
+}
+
+
+void TcpSendWindow::push_outbound_into_tx_queue(const SocketBuffer& outbound, const std::shared_ptr<TcpInFlightSegment>& owner)
+{
+    if (transmit_cancelled.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    bool need_pump = false;
+    //
+    {
+        std::lock_guard lock(tx_queue_mutex);
+        tx_queue.push_back(TcpTxItem{.outbound = outbound, .owner = owner});
+
+        if (not tx_pump_running)
+        {
+            tx_pump_running = true;
+            need_pump = true;
+        }
+    }
+
+    if (not need_pump)
+    {
+        return;
+    }
+
+    app->sumit_task(background_tx_queue_transmit_worker(shared_from_this()));
+}
+
+co_async<> TcpSendWindow::background_tx_queue_transmit_worker(const std::shared_ptr<TcpSendWindow> window)
+{
+    TcpContext context{};
+    context.ip = window->destination_ip;
+    context.protocol = Protocol::TCP;
+
+    while (true)
+    {
+        if (window->transmit_cancelled.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+
+        TcpTxItem item;
+        //
+        {
+            std::lock_guard lock(window->tx_queue_mutex);
+            if (window->tx_queue.empty())
+            {
+                window->tx_pump_running = false;
+                co_return;
+            }
+
+            item = std::move(window->tx_queue.front());
+            window->tx_queue.pop_front();
+        }
+
+        co_await window->trans->async_send_tcp_segment(item.outbound, context);
+
+        if (item.owner)
+        {
+            window->app->sumit_task(window->retransmit_segment(item.owner));
+        }
+    }
 }
 
 void TcpSendWindow::update_peer_window(uint16_t window, uint32_t segment_sequence, uint32_t segment_ack)
@@ -103,12 +176,17 @@ void TcpSendWindow::update_peer_window(uint16_t window, uint32_t segment_sequenc
 
 std::optional<TcpProbeTarget> TcpSendWindow::probe_target() const
 {
-    if (pending.empty() or available_peer_window() != 0)
+    if (pending.empty())
     {
         return std::nullopt;
     }
 
     const auto& entry = pending.front();
+    if (entry->sequence_length == 0 or entry->sequence_length <= available_peer_window())
+    {
+        return std::nullopt;
+    }
+
     if (not entry->first_payload_byte.has_value())
     {
         return std::nullopt; // a pure ACK / FIN segment carries no probe-able data byte
@@ -167,7 +245,21 @@ void TcpSendWindow::acknowledge(uint32_t ack_number)
         }
     }
 
+    const bool advanced = ack_number > unacknowledged;
     unacknowledged = ack_number;
+
+    if (not advanced and ack_number < next_sequence)
+    {
+        if (++duplicate_ack_count >= 3)
+        {
+            duplicate_ack_count = 0;
+            (void) fast_retransmit(ack_number);
+        }
+    }
+    else
+    {
+        duplicate_ack_count = 0;
+    }
 
     if (slid)
     {
@@ -175,12 +267,24 @@ void TcpSendWindow::acknowledge(uint32_t ack_number)
     }
 }
 
+bool TcpSendWindow::fast_retransmit(uint32_t ack_number)
+{
+    for (const auto& entry: in_flight | std::views::values)
+    {
+        if (ack_number < entry->sequence_number + entry->sequence_length)
+        {
+            logger->warn("TCP fast retransmit of seq {} len {} after three duplicate acks",
+                         entry->sequence_number, entry->sequence_length);
+            push_outbound_into_tx_queue(entry->outbound);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void TcpSendWindow::dispatch_pending_outbounds()
 {
-    TcpContext context;
-    context.ip = destination_ip;
-    context.protocol = Protocol::TCP;
-
     while (not pending.empty())
     {
         auto entry = pending.front();
@@ -190,14 +294,12 @@ void TcpSendWindow::dispatch_pending_outbounds()
         }
 
         pending.pop_front();
-        if (entry->sequence_length == 0) // ack segment no need to retransmit
-        {
-            app->sumit_task(trans->async_send_tcp_segment(entry->outbound, context));
-        }
-        else
+
+        push_outbound_into_tx_queue(entry->outbound, entry);
+
+        if (entry->sequence_length > 0)
         {
             next_sequence = entry->sequence_number + entry->sequence_length;
-            app->sumit_task(retransmit_segment(entry));
         }
 
         in_flight.emplace(entry->id, entry);
@@ -219,18 +321,13 @@ void TcpSendWindow::cancel_pending_segments()
     in_flight.clear();
     pending.clear();
     last_probe_sequence.reset();
+    duplicate_ack_count = 0;
 }
 
-co_async<> TcpSendWindow::retransmit_segment(std::shared_ptr<TcpInFlightSegment> segment) const
+co_async<> TcpSendWindow::retransmit_segment(std::shared_ptr<TcpInFlightSegment> segment)
 {
-    TcpContext context;
-    context.ip = destination_ip;
-    context.protocol = Protocol::TCP;
-
     while (true)
     {
-        co_await trans->async_send_tcp_segment(segment->outbound, context);
-
         const auto timeout = retransmission_timeout(segment->retransmissions);
         auto timer = co_await coro::sleep(timeout);
         if (timer.is_cancelled() or segment->acknowledged->load(std::memory_order_acquire))
@@ -242,13 +339,19 @@ co_async<> TcpSendWindow::retransmit_segment(std::shared_ptr<TcpInFlightSegment>
         {
             logger->error("TCP segment seq {} len {} exceeded {} retransmissions", segment->sequence_number,
                           segment->sequence_length, max_retransmissions);
-            events->on_retransmission_failed();
+
+            if (auto handler = events.lock())
+            {
+                handler->on_retransmission_failed();
+            }
             co_return;
         }
 
         ++segment->retransmissions;
         logger->warn("TCP segment seq {} timed out after {}ms, retransmission {}/{}",
                      segment->sequence_number, timeout.count(), segment->retransmissions, max_retransmissions);
+
+        push_outbound_into_tx_queue(segment->outbound);
     }
 }
 

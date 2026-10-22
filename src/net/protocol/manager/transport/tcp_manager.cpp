@@ -218,6 +218,7 @@ bool TcpManager::bind_socket(TcpSocketUser* user, const SocketAddress& local)
     }
 
     it->second = std::make_shared<TcpListenSession>(this, local);
+    it->second->activate_transmit();
     user->session = it->second;
     return true;
 }
@@ -241,6 +242,7 @@ bool TcpManager::connect_socket(TcpSocketUser* user, const SocketAddress& remote
 
         auto conn_session = std::make_shared<TcpConnectSession>(this, TcpState::SynSent, handle);
         it->second = conn_session;
+        conn_session->activate_transmit();
 
         // The SYN-ACK may already have arrived before the waiter was added.
         auto result = conn_session->try_to_add_connect_waiter(user);
@@ -253,6 +255,8 @@ bool TcpManager::connect_socket(TcpSocketUser* user, const SocketAddress& remote
 
 void TcpManager::add_new_connection_session(const std::shared_ptr<TcpConnectSession>& session)
 {
+    session->activate_transmit();
+
     std::unique_lock lock(socket_mutex);
     connection_sessions.emplace(session->get_socket_handle(), session);
 }

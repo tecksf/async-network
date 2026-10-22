@@ -1,6 +1,7 @@
 #include "polling.h"
 #include <sys/eventfd.h>
 #include <sys/poll.h>
+#include <unistd.h>
 #include <cerrno>
 
 namespace coro {
@@ -229,6 +230,9 @@ void Polling::handle_one_entry(struct io_uring_cqe* cqe)
     context->result = cqe->res;
     if (context->type == PollType::Event)
     {
+        uint64_t pending = 0;
+        (void) ::read(wakener.fd, &pending, sizeof(pending));
+
         register_wakener();
         drain_prepare_tasks();
     }
