@@ -95,7 +95,10 @@ void Runtime::start()
     for (size_t i = 0; i < num_workers; ++i)
     {
         auto polling = std::make_shared<Polling>(impl->logger, impl->fanout_id);
-        polling->set_network_interface(impl->controller);
+        if (not polling->set_network_interface(impl->controller))
+        {
+            return;
+        }
         impl->polling.push_back(polling);
     }
 

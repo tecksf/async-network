@@ -30,7 +30,7 @@ public:
     const NetConfig& get_config() const;
 
     void deliver_message(uint8_t*, size_t) override;
-    void set_interface_name(const std::string& name);
+    bool set_interface_name(const std::string& name);
     std::string get_interface_name() const override;
     MacAddress get_host_mac() const override;
     IpAddress get_host_ip() const override;

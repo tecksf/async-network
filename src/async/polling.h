@@ -41,7 +41,7 @@ public:
     Polling(Polling&&) = delete;
     Polling& operator=(Polling&&) = delete;
     struct io_uring* ring() noexcept;
-    void set_network_interface(std::shared_ptr<net::NetworkInterface> interface);
+    bool set_network_interface(std::shared_ptr<net::NetworkInterface> interface);
     int packet_fd() const noexcept;
 
     void run(std::stop_token stoken);
@@ -70,7 +70,7 @@ private:
     std::shared_ptr<net::NetworkInterface> network_interface;
 
     void init();
-    void open_capture();
+    bool open_capture();
     void register_wakener();
     void register_packet_poll();
     bool implement_ready_tasks();

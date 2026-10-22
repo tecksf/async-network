@@ -47,6 +47,31 @@ set_target_properties(async_network PROPERTIES
     INSTALL_RPATH "${LIBURING_LIBDIR}"
 )
 
+#=========================== Examples ============================
+
+file(GLOB EXAMPLE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp")
+
+if (NOT EXAMPLE_SOURCES)
+    message(STATUS "No example sources found under examples/, skipping example targets")
+endif ()
+
+foreach (example_source IN LISTS EXAMPLE_SOURCES)
+    get_filename_component(example_target "${example_source}" NAME_WE)
+
+    add_executable(${example_target} "${example_source}")
+    target_link_libraries(${example_target} PRIVATE coro net)
+    set_target_properties(${example_target} PROPERTIES
+        BUILD_RPATH "${LIBURING_LIBDIR}"
+        BUILD_RPATH_USE_ORIGIN ON
+        INSTALL_RPATH "${LIBURING_LIBDIR}"
+    )
+    add_custom_command(TARGET ${example_target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/config"
+        "$<TARGET_FILE_DIR:${example_target}>/config"
+    )
+endforeach ()
+
 #=========================== UT ============================
 
 file(GLOB_RECURSE UT_SOURCES tests/*.cpp)

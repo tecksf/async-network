@@ -40,10 +40,10 @@ struct io_uring* Polling::ring() noexcept
     return &poll_ring;
 }
 
-void Polling::set_network_interface(std::shared_ptr<net::NetworkInterface> interface)
+bool Polling::set_network_interface(std::shared_ptr<net::NetworkInterface> interface)
 {
     this->network_interface = interface;
-    open_capture();
+    return open_capture();
 }
 
 int Polling::packet_fd() const noexcept
@@ -68,7 +68,7 @@ void Polling::init()
     }
 }
 
-void Polling::open_capture()
+bool Polling::open_capture()
 {
     packet_ctx.type = PollType::Packet;
     packet_ctx.fd = -1;
@@ -78,10 +78,11 @@ void Polling::open_capture()
     {
         logger->warn("[Polling] AF_PACKET capture unavailable: {}", std::strerror(-packet_ctx.fd));
         packet_ctx.fd = -1;
-        return;
+        return false;
     }
 
     logger->info("[Polling] packet capture fd {} (fanout id {})", packet_ctx.fd, fanout_id);
+    return true;
 }
 
 void Polling::run(std::stop_token stoken)

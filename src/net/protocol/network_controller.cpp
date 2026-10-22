@@ -85,7 +85,11 @@ bool NetworkController::apply_config(const NetConfig& new_config)
     config = new_config;
     config.normalize();
 
-    set_interface_name(config.interface_name);
+    if (not set_interface_name(config.interface_name))
+    {
+        return false;
+    }
+
     if (auto address = IpAddress::from(config.host_ip))
     {
         set_host_ip(address.value());
@@ -110,15 +114,22 @@ const NetConfig& NetworkController::get_config() const
     return config;
 }
 
-void NetworkController::set_interface_name(const std::string& name)
+bool NetworkController::set_interface_name(const std::string& name)
 {
     interface_name = name;
 
     uint8_t mac[6];
-    if (get_mac_by_ifname(interface_name, mac))
+    if (not get_mac_by_ifname(interface_name, mac))
     {
-        host_mac = MacAddress(std::span(mac));
+        logger->error("[config] cannot detect the MAC address of interface '{}': "
+                      "the interface does not exist or SIOCGIFHWADDR failed. "
+                      "Check the 'interface=' setting (available interfaces: `ip -br link`)",
+                      interface_name);
+        return false;
     }
+
+    host_mac = MacAddress(std::span(mac));
+    return true;
 }
 
 std::string NetworkController::get_interface_name() const
