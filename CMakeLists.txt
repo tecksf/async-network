@@ -32,8 +32,13 @@ file(GLOB_RECURSE NET_SOURCES src/net/*.cpp src/utils/*.cpp src/socket/*.cpp)
 add_library(net STATIC ${NET_SOURCES})
 target_link_libraries(net PUBLIC spdlog::spdlog)
 
+# http: HTTP/1.1 server built on top of the coroutine TCP stack.
+file(GLOB_RECURSE HTTP_SOURCES src/http/*.cpp)
+add_library(http STATIC ${HTTP_SOURCES})
+target_link_libraries(http PUBLIC net coro)
+
 add_executable(async_network main.cpp)
-target_link_libraries(async_network PRIVATE coro net)
+target_link_libraries(async_network PRIVATE coro net http)
 
 add_custom_command(TARGET async_network POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -79,6 +84,7 @@ add_executable(async_network_ut ${UT_SOURCES})
 target_link_libraries(async_network_ut PRIVATE
     net
     coro
+    http
     gtest
     gmock
     gtest_main
