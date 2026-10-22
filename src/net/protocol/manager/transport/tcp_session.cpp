@@ -369,14 +369,17 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
     uint32_t seq = header.get_sequence_number();
     uint32_t payload_size = payload->size();
     TcpState next_state = state;
+    bool need_reply = false;
 
     if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
+        need_reply = true;
         receive_user_data(header, payload);
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
     {
+        need_reply = true;
         receive_window.acknowledge_finish_sequence(seq + payload_size);
     }
 
@@ -385,8 +388,11 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
         next_state = TcpState::CloseWait;
     }
 
-    auto outbound = app->allocate_socket_buffer();
-    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+    if (need_reply)
+    {
+        auto outbound = app->allocate_socket_buffer();
+        send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+    }
 
     return next_state;
 }
@@ -436,14 +442,17 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
     uint32_t seq = header.get_sequence_number();
     uint32_t payload_size = payload->size();
     TcpState next_state = state;
+    bool need_reply = false;
 
     if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
+        need_reply = true;
         receive_user_data(header, payload);
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
     {
+        need_reply = true;
         receive_window.acknowledge_finish_sequence(seq + payload_size);
     }
 
@@ -452,8 +461,11 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
         next_state = TcpState::TimeWait;
     }
 
-    auto outbound = app->allocate_socket_buffer();
-    send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+    if (need_reply)
+    {
+        auto outbound = app->allocate_socket_buffer();
+        send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
+    }
 
     return next_state;
 }
