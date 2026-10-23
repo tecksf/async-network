@@ -335,6 +335,59 @@ std::expected<int, std::error_code> TcpWriteAwaiter::await_resume() const noexce
     return static_cast<int>(context.data.size());
 }
 
+TcpWriteAllAwaiter::TcpWriteAllAwaiter(std::errc ec)
+    : AwaiterBase(nullptr, SocketOperation::Write)
+{
+    context.set_error(ec);
+}
+
+TcpWriteAllAwaiter::TcpWriteAllAwaiter(std::shared_ptr<trans::TcpSession> session, std::span<uint8_t> buffer)
+    : AwaiterBase(nullptr, SocketOperation::Write)
+      , session(std::move(session))
+      , size(buffer.size())
+{
+    context.data = buffer;
+}
+
+bool TcpWriteAllAwaiter::await_ready() const noexcept
+{
+    return context.get_error() != std::errc{};
+}
+
+bool TcpWriteAllAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    context.handle = h;
+
+    if (not session)
+    {
+        context.set_error(std::errc::bad_file_descriptor);
+        return false;
+    }
+
+    const auto result = session->try_to_add_write_waiter(&context);
+    if (result.kind == trans::TcpSessionResult::Kind::None)
+    {
+        return true;
+    }
+
+    if (result.kind != trans::TcpSessionResult::Kind::Writable)
+    {
+        context.set_error(result.error != std::errc{} ? result.error : std::errc::not_connected);
+    }
+
+    return false;
+}
+
+std::expected<std::size_t, std::error_code> TcpWriteAllAwaiter::await_resume() const noexcept
+{
+    if (const auto error = context.get_error(); error != std::errc{})
+    {
+        return to_unexpected(error);
+    }
+
+    return size - context.data.size();
+}
+
 TcpReadAwaiter::TcpReadAwaiter(std::errc ec)
     : AwaiterBase(nullptr, SocketOperation::Read)
 {

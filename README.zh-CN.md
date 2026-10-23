@@ -105,8 +105,8 @@ runtime.block_on(co_main(user_logger, runtime.network_address()));
 | `coro::WaitGroup` | `add(n)`、`done()`、`co_await group` |
 | `coro::net::UdpSocket` | `bind(addr)`、`send_to(...)`、`receive_from(span)`、`close()` |
 | `coro::net::TcpListener` | `bind(addr)`、`accept()`、`close()` |
-| `coro::net::TcpSocket` | `connect(addr)`、`read(span)`、`write(data)`、`shutdown(how)`、`split()` |
-| `TcpReadStream` / `TcpWriteStream` | `read(span)`、`write(data)`、`shutdown()` |
+| `coro::net::TcpSocket` | `connect(addr)`、`read(span)`、`write(data)`、`write_all(data)`、`shutdown(how)`、`split()` |
+| `TcpReadStream` / `TcpWriteStream` | `read(span)`、`write(data)`、`write_all(data)`、`shutdown()` |
 
 大多数 socket 操作返回 `std::expected<T, std::error_code>`，用 `if (not result)` 与 `result.error()` 处理失败。
 

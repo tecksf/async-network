@@ -67,18 +67,32 @@ struct TcpSessionResult {
         None,
         Connected,
         Readable,
+        // The pending writer has queued its whole buffer: wake it up.
+        Writable,
         EndOfStream,
+        // The pending writer can never finish (e.g. the write side was shut down); the session stays alive.
+        Error,
         Closed,
     };
 
     bool is_nothing_to_do() const
     {
-        return kind == Kind::None || waiter == nullptr;
+        return kind == Kind::None || (waiter == nullptr && write_waiter == nullptr);
     }
 
     Kind kind = Kind::None;
     TcpSocketUser* waiter = nullptr;
+    TcpSocketUser* write_waiter = nullptr;
     std::errc error = std::errc{};
+};
+
+// Callers that stopped a session operation halfway and wait for the session to serve them. Either one
+// may be null. A closed session can no longer serve them, so it hands them over together with the
+// reason; waking them is the manager's job.
+struct TcpParkedUsers {
+    TcpSocketUser* reader = nullptr;
+    TcpSocketUser* writer = nullptr;
+    std::errc reason = std::errc{};
 };
 
 struct TcpStateTransition {
@@ -120,6 +134,8 @@ public:
     std::expected<void, std::errc> shutdown(ShutdownHow how);
     std::expected<int, std::errc> send_user_data(std::span<uint8_t> user_data);
     TcpSessionResult try_to_add_read_waiter(TcpSocketUser* user);
+    TcpSessionResult try_to_add_write_waiter(TcpSocketUser* user);
+    TcpParkedUsers take_parked_users();
 
 protected:
     [[nodiscard]] SocketBuffer allocate_socket_buffer();
@@ -145,8 +161,11 @@ protected:
     static co_async<> time_wait_timer(std::shared_ptr<TcpSession> session, std::shared_ptr<std::atomic_bool> token);
     void on_retransmission_failed() override;
     TCP_LOCK_REQUIRED TcpSocketUser* take_waiter();
+    TCP_LOCK_REQUIRED TcpSocketUser* take_write_waiter();
+    TCP_LOCK_REQUIRED TcpSessionResult flush_write_waiter();
 
     std::expected<int, std::errc> send_user_data(const std::vector<SocketBuffer>& payloads);
+    TCP_LOCK_REQUIRED std::expected<int, std::errc> send_user_data_locked(std::span<uint8_t> user_data);
     TCP_LOCK_REQUIRED std::errc writability() const;
 
 protected:
@@ -197,6 +216,7 @@ protected:
     TcpReceiveWindow receive_window;
     std::errc closed_reason = std::errc{};
     TcpSocketUser* waiter = nullptr;
+    TcpSocketUser* write_waiter = nullptr;
 };
 
 class TcpConnectSession : public TcpSession {

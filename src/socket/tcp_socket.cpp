@@ -101,6 +101,21 @@ TcpWriteAwaiter TcpWriteStream::write(std::string_view data) const
     return write(std::span((uint8_t*) data.data(), data.size()));
 }
 
+TcpWriteAllAwaiter TcpWriteStream::write_all(std::span<uint8_t> data) const
+{
+    if (not session)
+    {
+        return TcpWriteAllAwaiter(std::errc::not_connected);
+    }
+
+    return TcpWriteAllAwaiter(session, data);
+}
+
+TcpWriteAllAwaiter TcpWriteStream::write_all(std::string_view data) const
+{
+    return write_all(std::span((uint8_t*) data.data(), data.size()));
+}
+
 std::expected<void, std::error_code> TcpWriteStream::shutdown() const
 {
     return shutdown_session(session, ShutdownHow::Write);
@@ -173,6 +188,21 @@ TcpWriteAwaiter TcpSocket::write(std::span<uint8_t> data) const
 TcpWriteAwaiter TcpSocket::write(std::string_view data) const
 {
     return write(std::span((uint8_t*) data.data(), data.size()));
+}
+
+TcpWriteAllAwaiter TcpSocket::write_all(std::span<uint8_t> data) const
+{
+    if (not session)
+    {
+        return TcpWriteAllAwaiter(std::errc::not_connected);
+    }
+
+    return TcpWriteAllAwaiter(session, data);
+}
+
+TcpWriteAllAwaiter TcpSocket::write_all(std::string_view data) const
+{
+    return write_all(std::span((uint8_t*) data.data(), data.size()));
 }
 
 TcpConnectAwaiter TcpSocket::connect(const IpAddress& ip, uint16_t port)

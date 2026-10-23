@@ -3,6 +3,7 @@
 
 #include <span>
 #include <expected>
+#include <cstddef>
 #include <memory>
 #include <system_error>
 #include <utility>
@@ -109,6 +110,18 @@ struct TcpWriteAwaiter : AwaiterBase<TcpSocketUser> {
 
 private:
     std::shared_ptr<trans::TcpSession> session;
+};
+
+struct TcpWriteAllAwaiter : AwaiterBase<TcpSocketUser> {
+    explicit TcpWriteAllAwaiter(std::errc ec);
+    TcpWriteAllAwaiter(std::shared_ptr<trans::TcpSession> session, std::span<uint8_t> buffer);
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<> h) noexcept;
+    std::expected<std::size_t, std::error_code> await_resume() const noexcept;
+
+private:
+    std::shared_ptr<trans::TcpSession> session;
+    std::size_t size = 0;
 };
 
 struct TcpReadAwaiter : AwaiterBase<TcpSocketUser> {

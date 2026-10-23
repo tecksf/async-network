@@ -103,8 +103,8 @@ runtime.block_on(co_main(user_logger, runtime.network_address()));
 | `coro::WaitGroup` | `add(n)`, `done()`, `co_await group` |
 | `coro::net::UdpSocket` | `bind(addr)`, `send_to(...)`, `receive_from(span)`, `close()` |
 | `coro::net::TcpListener` | `bind(addr)`, `accept()`, `close()` |
-| `coro::net::TcpSocket` | `connect(addr)`, `read(span)`, `write(data)`, `shutdown(how)`, `split()` |
-| `TcpReadStream` / `TcpWriteStream` | `read(span)`, `write(data)`, `shutdown()` |
+| `coro::net::TcpSocket` | `connect(addr)`, `read(span)`, `write(data)`, `write_all(data)`, `shutdown(how)`, `split()` |
+| `TcpReadStream` / `TcpWriteStream` | `read(span)`, `write(data)`, `write_all(data)`, `shutdown()` |
 
 Most socket operations return `std::expected<T, std::error_code>`; test with `if (not result)` and inspect `result.error()`.
 

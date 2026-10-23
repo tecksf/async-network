@@ -40,6 +40,7 @@ private:
     void dispatch_session_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
     static bool check_connect_waiter_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
     static bool check_read_waiter_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result);
+    static bool check_write_waiter_result(const TcpSessionResult& result);
 
     std::shared_ptr<TcpConnectSession> find_connection_session(const TcpSocketHandle& handle) const;
     std::shared_ptr<TcpListenSession> find_listen_session(const SocketAddress& local) const;

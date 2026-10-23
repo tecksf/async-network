@@ -47,6 +47,8 @@ public:
 
     TcpWriteAwaiter write(std::span<uint8_t> data) const;
     TcpWriteAwaiter write(std::string_view data) const;
+    TcpWriteAllAwaiter write_all(std::span<uint8_t> data) const;
+    TcpWriteAllAwaiter write_all(std::string_view data) const;
 
     std::expected<void, std::error_code> shutdown() const;
     SocketAddress get_local_address() const;
@@ -75,6 +77,8 @@ public:
     SocketAddress get_remote_address() const;
     TcpWriteAwaiter write(std::span<uint8_t> data) const;
     TcpWriteAwaiter write(std::string_view data) const;
+    TcpWriteAllAwaiter write_all(std::span<uint8_t> data) const;
+    TcpWriteAllAwaiter write_all(std::string_view data) const;
     TcpReadAwaiter read(std::span<uint8_t> data) const;
 
     std::expected<void, std::error_code> shutdown(ShutdownHow how) const;

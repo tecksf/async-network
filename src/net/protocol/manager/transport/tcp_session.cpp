@@ -115,6 +115,80 @@ TcpSocketUser* TcpSession::take_waiter()
     return w;
 }
 
+TcpSessionResult TcpSession::try_to_add_write_waiter(TcpSocketUser* user)
+{
+    TcpSessionResult result;
+    if (user == nullptr)
+    {
+        return result;
+    }
+
+    std::lock_guard lock(session_mutex);
+
+    write_waiter = user;
+    return flush_write_waiter();
+}
+
+TcpSocketUser* TcpSession::take_write_waiter()
+{
+    auto w = write_waiter;
+    write_waiter = nullptr;
+    return w;
+}
+
+TcpSessionResult TcpSession::flush_write_waiter()
+{
+    TcpSessionResult result;
+    if (write_waiter == nullptr)
+    {
+        return result;
+    }
+
+    if (const std::errc reason = writability(); reason != std::errc{})
+    {
+        result.kind = TcpSessionResult::Kind::Error;
+        result.error = reason;
+        result.write_waiter = take_write_waiter();
+        return result;
+    }
+
+    while (not write_waiter->data.empty())
+    {
+        auto sent = send_user_data_locked(write_waiter->data);
+        if (not sent)
+        {
+            result.kind = TcpSessionResult::Kind::Error;
+            result.error = sent.error();
+            result.write_waiter = take_write_waiter();
+            return result;
+        }
+
+        // Nothing was queued: the outbound queue is full, the writer keeps waiting for the next
+        // acknowledgement to free some room.
+        if (sent.value() == 0)
+        {
+            return result;
+        }
+
+        write_waiter->data = write_waiter->data.subspan(static_cast<size_t>(sent.value()));
+    }
+
+    result.kind = TcpSessionResult::Kind::Writable;
+    result.write_waiter = take_write_waiter();
+    return result;
+}
+
+TcpParkedUsers TcpSession::take_parked_users()
+{
+    std::lock_guard lock(session_mutex);
+
+    TcpParkedUsers parked;
+    parked.reader = take_waiter();
+    parked.writer = take_write_waiter();
+    parked.reason = closed_reason != std::errc{} ? closed_reason : std::errc::not_connected;
+    return parked;
+}
+
 bool TcpSession::is_closed() const
 {
     return state.load(std::memory_order_acquire) == TcpState::Closed;
@@ -276,6 +350,13 @@ TcpSessionResult TcpSession::fill_session_result(const std::optional<TcpStateTra
         }
     }
 
+    if (result.kind == TcpSessionResult::Kind::Closed)
+    {
+        result.waiter = take_waiter();
+        result.write_waiter = take_write_waiter();
+        return result;
+    }
+
     if (result.kind == TcpSessionResult::Kind::None)
     {
         if (receive_window.has_readable_data())
@@ -291,6 +372,21 @@ TcpSessionResult TcpSession::fill_session_result(const std::optional<TcpStateTra
     if (result.kind != TcpSessionResult::Kind::None)
     {
         result.waiter = take_waiter();
+    }
+
+    const TcpSessionResult flushed = flush_write_waiter();
+    if (flushed.write_waiter != nullptr)
+    {
+        result.write_waiter = flushed.write_waiter;
+        if (result.error == std::errc{})
+        {
+            result.error = flushed.error;
+        }
+
+        if (result.kind == TcpSessionResult::Kind::None)
+        {
+            result.kind = flushed.kind;
+        }
     }
 
     return result;
@@ -802,7 +898,11 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
 std::expected<int, std::errc> TcpSession::send_user_data(std::span<uint8_t> user_data)
 {
     std::lock_guard lock(session_mutex);
+    return send_user_data_locked(user_data);
+}
 
+std::expected<int, std::errc> TcpSession::send_user_data_locked(std::span<uint8_t> user_data)
+{
     if (const std::errc reason = writability(); reason != std::errc{})
     {
         return std::unexpected(reason);
@@ -812,17 +912,13 @@ std::expected<int, std::errc> TcpSession::send_user_data(std::span<uint8_t> user
     const size_t max_mtu_payload = static_cast<size_t>(tcp_config.mtu) - TcpSegment::HeaderSize;
     const size_t max_capacity = std::clamp<size_t>(get_send_mss(), 1, max_mtu_payload);
 
-    const size_t max_queued = std::max<size_t>(static_cast<size_t>(tcp_config.window_size) * 2, max_capacity);
+    const size_t max_queued_size = std::max<size_t>(static_cast<size_t>(tcp_config.window_size) * 2, max_capacity);
+    size_t queued_size = send_window->queued_bytes();
 
     std::span<uint8_t> rest = user_data;
-    while (not rest.empty())
+    while (not rest.empty() and queued_size < max_queued_size)
     {
-        if (send_window->queued_bytes() >= max_queued)
-        {
-            break;
-        }
-
-        const size_t len = std::min(rest.size(), max_capacity);
+        const size_t len = std::min({rest.size(), max_capacity, max_queued_size - queued_size});
         auto outbound = allocate_socket_buffer();
         if (not outbound)
         {
@@ -832,6 +928,7 @@ std::expected<int, std::errc> TcpSession::send_user_data(std::span<uint8_t> user
         std::copy_n(rest.begin(), len, outbound->allocate(len).begin());
         payloads.push_back(outbound);
 
+        queued_size += len;
         rest = rest.subspan(len);
     }
 
