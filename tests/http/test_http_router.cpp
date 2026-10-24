@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -13,17 +12,19 @@ using namespace net;
 
 namespace {
 
-void invoke(const HttpRouter::Handler& handler)
+void invoke(const HttpHandler& handler)
 {
+    static const HttpResponse::Reply discard = [](std::string_view) -> co_async<> { co_return; };
+
     HttpRequest request;
-    HttpResponse response;
+    HttpResponse response(discard);
 
     auto task = handler(request, response);
     auto handle = task.release_handle();
     handle.resume();
 }
 
-HttpRouter::Handler tagged(std::string& hit, std::string label)
+HttpHandler tagged(std::string& hit, std::string label)
 {
     return [&hit, label = std::move(label)](HttpRequest&, HttpResponse&) -> co_async<> {
         hit = label;
@@ -306,10 +307,10 @@ TEST(HttpRouterTest, invalidPatternsAreRejected)
     for (const std::string pattern: {"", "hello", "/a/*/b", "/a/{}", "/a/{id", "/a/b}", "/a//b", "/a?x=1", "/a/{"})
     {
         SCOPED_TRACE(pattern);
-        EXPECT_THROW(router.add(HttpMethod::Get, pattern, handler), std::invalid_argument);
+        EXPECT_TRUE(router.add(HttpMethod::Get, pattern, handler).has_value());
     }
 
-    EXPECT_THROW(router.add(HttpMethod::Get, "/x", HttpRouter::Handler{}), std::invalid_argument);
+    EXPECT_TRUE(router.add(HttpMethod::Get, "/x", HttpHandler{}).has_value());
     EXPECT_EQ(router.size(), 0u);
 }
 
@@ -320,10 +321,10 @@ TEST(HttpRouterTest, duplicateRouteIsRejected)
     const auto handler = tagged(hit, "x");
 
     router.get("/dup", handler);
-    EXPECT_THROW(router.get("/dup", handler), std::invalid_argument);
+    EXPECT_TRUE(router.get("/dup", handler).has_value());
 
     // Different methods may share the same path.
-    EXPECT_NO_THROW(router.post("/dup", handler));
+    EXPECT_FALSE(router.post("/dup", handler).has_value());
     EXPECT_EQ(router.size(), 2u);
 }
 
@@ -335,14 +336,14 @@ TEST(HttpRouterTest, conflictingParamNamesAtSamePosition)
 
     router.get("/u/{id}", handler);
 
-    EXPECT_THROW(router.get("/u/{name}", handler), std::invalid_argument);
+    EXPECT_TRUE(router.get("/u/{name}", handler).has_value());
 
     // Reusing the same parameter name on different branches is valid.
-    EXPECT_NO_THROW(router.get("/u/{id}/a", handler));
-    EXPECT_NO_THROW(router.get("/u/{id}/b", handler));
+    EXPECT_FALSE(router.get("/u/{id}/a", handler).has_value());
+    EXPECT_FALSE(router.get("/u/{id}/b", handler).has_value());
 
     // Duplicate parameter names inside a single pattern are rejected.
-    EXPECT_THROW(router.get("/v/{id}/{id}", handler), std::invalid_argument);
+    EXPECT_TRUE(router.get("/v/{id}/{id}", handler).has_value());
 }
 
 TEST(HttpRouterTest, describeSizeAndClear)

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <string>
 #include <spdlog/spdlog.h>
+#include "http_router.h"
 
 namespace coro::net {
 
@@ -27,6 +28,7 @@ struct HttpServerCore {
     std::atomic<size_t> active_connections{0};
     HttpServerConfig config;
     std::shared_ptr<spdlog::logger> logger;
+    HttpRouter router;
 };
 
 }

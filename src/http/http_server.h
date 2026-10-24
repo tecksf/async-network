@@ -5,13 +5,13 @@
 #include <async/socket.h>
 #include <async/task.hpp>
 #include "http_server_base.h"
+#include "handler/static_file_handler.h"
 
 namespace coro::net {
 
 class HttpServer {
 public:
-    HttpServer();
-    explicit HttpServer(std::shared_ptr<spdlog::logger> logger);
+    explicit HttpServer(std::shared_ptr<spdlog::logger> log = nullptr);
     ~HttpServer();
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;
@@ -21,7 +21,19 @@ public:
 
     void stop();
 
+    void get(std::string_view pattern, HttpHandler handler);
+    void post(std::string_view pattern, HttpHandler handler);
+    void put(std::string_view pattern, HttpHandler handler);
+    void patch(std::string_view pattern, HttpHandler handler);
+    void del(std::string_view pattern, HttpHandler handler);
+    void head(std::string_view pattern, HttpHandler handler);
+    void options(std::string_view pattern, HttpHandler handler);
+    void any(std::string_view pattern, HttpHandler handler);
+    void mount(std::string_view url_prefix, std::string root, StaticFileOptions options = {});
+    void log_routes() const;
+
 private:
+    void add_route(HttpMethod method, std::string_view pattern, HttpHandler handler);
     co_async<> accept_client();
 
 private:

@@ -2,7 +2,7 @@
 #include <set>
 #include <algorithm>
 #include <format>
-#include <stdexcept>
+#include "http_utils.h"
 
 namespace coro::net {
 
@@ -18,31 +18,6 @@ constexpr std::array<HttpMethod, 7> AllMethods{
     HttpMethod::Options,
 };
 
-std::vector<std::string_view> split_path(std::string_view path)
-{
-    std::vector<std::string_view> segments;
-
-    size_t begin = 0;
-    while (begin < path.size())
-    {
-        const auto slash = path.find('/', begin);
-        if (slash == std::string_view::npos)
-        {
-            segments.push_back(path.substr(begin));
-            break;
-        }
-
-        if (slash > begin)
-        {
-            segments.push_back(path.substr(begin, slash - begin));
-        }
-
-        begin = slash + 1;
-    }
-
-    return segments;
-}
-
 std::string_view wildcard_remainder(std::string_view path, std::string_view first_segment)
 {
     const size_t offset = static_cast<size_t>(first_segment.data() - path.data());
@@ -57,7 +32,6 @@ std::string_view wildcard_remainder(std::string_view path, std::string_view firs
 }
 
 }
-
 
 const HttpRouter::Param* HttpRouter::Params::find(std::string_view name) const
 {
@@ -85,10 +59,10 @@ std::optional<std::string_view> HttpRouter::Params::get(std::string_view name) c
 
 bool HttpRouter::Node::has_handler() const
 {
-    return std::ranges::any_of(handlers, [](const Handler& handler) { return handler != nullptr; });
+    return std::ranges::any_of(handlers, [](const HttpHandler& handler) { return handler != nullptr; });
 }
 
-const HttpRouter::Handler* HttpRouter::Node::get_handler_for(HttpMethod method) const
+const HttpHandler* HttpRouter::Node::get_handler_for(HttpMethod method) const
 {
     if (method == HttpMethod::Any)
     {
@@ -145,22 +119,22 @@ std::string HttpRouter::Node::get_allowed_methods() const
     return text;
 }
 
-void HttpRouter::add(HttpMethod method, std::string_view pattern, Handler handler)
+std::optional<std::string> HttpRouter::add(HttpMethod method, std::string_view pattern, HttpHandler handler)
 {
     if (not handler)
     {
-        throw std::invalid_argument("http router: empty handler");
+        return std::string("http router: empty handler");
     }
 
     if (pattern.empty() or pattern.front() != '/' or
         (pattern.size() > 1 and pattern.find("//") != std::string_view::npos))
     {
-        throw std::invalid_argument("http router: pattern must be an absolute path without empty segments");
+        return std::string("http router: pattern must be an absolute path without empty segments");
     }
 
     if (pattern.find_first_of("?#") != std::string_view::npos)
     {
-        throw std::invalid_argument("http router: pattern must not contain query or fragment");
+        return std::string("http router: pattern must not contain query or fragment");
     }
 
     const auto segments = split_path(pattern);
@@ -176,7 +150,7 @@ void HttpRouter::add(HttpMethod method, std::string_view pattern, Handler handle
         {
             if (i + 1 != segments.size())
             {
-                throw std::invalid_argument("http router: wildcard must be the last segment");
+                return std::string("http router: wildcard must be the last segment");
             }
 
             if (not node->wildcard_node)
@@ -192,23 +166,23 @@ void HttpRouter::add(HttpMethod method, std::string_view pattern, Handler handle
         {
             if (segment.size() < 3 or segment.front() != '{' or segment.back() != '}')
             {
-                throw std::invalid_argument("http router: malformed parameter segment");
+                return std::string("http router: malformed parameter segment");
             }
 
             const auto name = segment.substr(1, segment.size() - 2);
             if (name.find_first_of("{}*") != std::string_view::npos)
             {
-                throw std::invalid_argument("http router: malformed parameter name");
+                return std::string("http router: malformed parameter name");
             }
 
             if (param_names.contains(name))
             {
-                throw std::invalid_argument("http router: duplicate parameter name");
+                return std::string("http router: duplicate parameter name");
             }
 
             if (node->param_node and node->param_node->param_name != name)
             {
-                throw std::invalid_argument("http router: conflicting parameter name at the same position");
+                return std::string("http router: conflicting parameter name at the same position");
             }
 
             param_names.insert(name);
@@ -225,7 +199,7 @@ void HttpRouter::add(HttpMethod method, std::string_view pattern, Handler handle
 
         if (segment.find_first_of("{}*") != std::string_view::npos)
         {
-            throw std::invalid_argument("http router: malformed literal segment");
+            return std::string("http router: malformed literal segment");
         }
 
         auto [slot, inserted] = node->literals.try_emplace(std::string(segment));
@@ -240,11 +214,52 @@ void HttpRouter::add(HttpMethod method, std::string_view pattern, Handler handle
     const size_t index = static_cast<size_t>(method);
     if (node->handlers[index])
     {
-        throw std::invalid_argument("http router: duplicate route");
+        return std::string("http router: duplicate route");
     }
 
     node->handlers[index] = std::move(handler);
     routes.emplace_back(method, std::string(pattern));
+    return std::nullopt;
+}
+
+std::optional<std::string> HttpRouter::get(std::string_view pattern, HttpHandler handler)
+{
+    return add(HttpMethod::Get, pattern, std::move(handler));
+}
+
+std::optional<std::string> HttpRouter::post(std::string_view pattern, HttpHandler handler)
+{
+    return add(HttpMethod::Post, pattern, std::move(handler));
+}
+
+std::optional<std::string> HttpRouter::put(std::string_view pattern, HttpHandler handler)
+{
+    return add(HttpMethod::Put, pattern, std::move(handler));
+}
+
+std::optional<std::string> HttpRouter::patch(std::string_view pattern, HttpHandler handler)
+{
+    return add(HttpMethod::Patch, pattern, std::move(handler));
+}
+
+std::optional<std::string> HttpRouter::del(std::string_view pattern, HttpHandler handler)
+{
+    return add(HttpMethod::Delete, pattern, std::move(handler));
+}
+
+std::optional<std::string> HttpRouter::head(std::string_view pattern, HttpHandler handler)
+{
+    return add(HttpMethod::Head, pattern, std::move(handler));
+}
+
+std::optional<std::string> HttpRouter::options(std::string_view pattern, HttpHandler handler)
+{
+    return add(HttpMethod::Options, pattern, std::move(handler));
+}
+
+std::optional<std::string> HttpRouter::any(std::string_view pattern, HttpHandler handler)
+{
+    return add(HttpMethod::Any, pattern, std::move(handler));
 }
 
 size_t HttpRouter::size() const

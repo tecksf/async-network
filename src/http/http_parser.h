@@ -11,46 +11,6 @@
 
 namespace coro::net {
 
-inline std::vector<std::string_view> split(std::string_view text, char delimiter)
-{
-    std::vector<std::string_view> parts;
-    size_t start = 0;
-
-    while (true)
-    {
-        const auto position = text.find(delimiter, start);
-        if (position == std::string_view::npos)
-        {
-            parts.push_back(text.substr(start));
-            break;
-        }
-
-        parts.push_back(text.substr(start, position - start));
-        start = position + 1;
-    }
-
-    return parts;
-}
-
-inline std::string_view trim(std::string_view text)
-{
-    auto is_space = [](char ch) {
-        return ch == ' ' or ch == '\t';
-    };
-
-    while (not text.empty() and is_space(text.front()))
-    {
-        text.remove_prefix(1);
-    }
-
-    while (not text.empty() and is_space(text.back()))
-    {
-        text.remove_suffix(1);
-    }
-
-    return text;
-}
-
 struct ParseError {
     HttpStatus status;
     std::string message;
@@ -87,21 +47,39 @@ public:
     {
     }
 
-    std::expected<Status, ParseError> parse(HttpBuffer& input, HttpRequest& request);
+    std::expected<Status, ParseError> parse_header(HttpBuffer& input, HttpRequest& request);
+    std::expected<Status, ParseError> parse_body(HttpBuffer& input, HttpRequest& request);
+
+    HttpBodyFraming get_body_framing() const;
+    size_t get_body_size() const;
+    bool has_body() const;
 
 private:
     static std::expected<HttpParser::Status, ParseError> parse_request_line(std::string_view line, HttpRequest& request);
     std::expected<HttpParser::Status, ParseError> parse_header_line(std::string_view line, HttpRequest& request);
     std::expected<HttpParser::Status, ParseError> verify_header(HttpBuffer& input, HttpRequest& request);
 
-    enum class Step {
+    std::optional<HttpParser::Status> read_body_line(HttpBuffer& input, std::string_view& line, size_t limit);
+    std::expected<Status, ParseError> parse_chunk_size_line(HttpBuffer& input);
+    std::expected<Status, ParseError> parse_chunk_data(HttpBuffer& input, HttpRequest& request);
+    std::expected<Status, ParseError> parse_chunk_data_end(HttpBuffer& input);
+    std::expected<Status, ParseError> parse_chunk_trailer(HttpBuffer& input);
+
+    enum class HeaderStep {
         RequestLine,
         HeaderLine,
-        Complete,
+        Finish,
+    };
+
+    enum class ChunkStep {
+        SizeLine,
+        Data,
+        DataEnd,
+        Trailer,
     };
 
     HttpLimits limits;
-    Step step = Step::RequestLine;
+    HeaderStep step = HeaderStep::RequestLine;
     size_t scan = 0;
     size_t line_begin = 0;
     size_t header_bytes = 0;
@@ -109,6 +87,13 @@ private:
 
     HttpBodyFraming body_framing = HttpBodyFraming::None;
     size_t body_size = 0;
+
+    bool body_complete = false;
+    ChunkStep chunk_step = ChunkStep::SizeLine;
+    size_t chunk_remaining = 0;
+    size_t body_received = 0;
+    size_t trailer_bytes = 0;
+    size_t body_scan = 0;
 };
 
 }

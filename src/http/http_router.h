@@ -10,17 +10,13 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <async/task.hpp>
 #include "http_types.h"
-#include "http_request.h"
-#include "http_response.h"
+#include "handler/http_handler.h"
 
 namespace coro::net {
 
 class HttpRouter {
 public:
-    using Handler = std::function<co_async<>(HttpRequest&, HttpResponse&)>;
-
     struct Param {
         std::string_view name;
         std::string_view value;
@@ -42,7 +38,7 @@ public:
 
     struct MatchResult {
         HttpMethod method = HttpMethod::Get;
-        const Handler* handler = nullptr;
+        const HttpHandler* handler = nullptr;
         Params params;
 
         // True when the path matched but the method was not registered; allowed_methods then lists the methods
@@ -58,15 +54,15 @@ public:
     HttpRouter& operator=(const HttpRouter&) = delete;
     ~HttpRouter() = default;
 
-    void add(HttpMethod method, std::string_view pattern, Handler handler);
-    void get(std::string_view pattern, Handler handler) { add(HttpMethod::Get, pattern, std::move(handler)); }
-    void post(std::string_view pattern, Handler handler) { add(HttpMethod::Post, pattern, std::move(handler)); }
-    void put(std::string_view pattern, Handler handler) { add(HttpMethod::Put, pattern, std::move(handler)); }
-    void patch(std::string_view pattern, Handler handler) { add(HttpMethod::Patch, pattern, std::move(handler)); }
-    void del(std::string_view pattern, Handler handler) { add(HttpMethod::Delete, pattern, std::move(handler)); }
-    void head(std::string_view pattern, Handler handler) { add(HttpMethod::Head, pattern, std::move(handler)); }
-    void options(std::string_view pattern, Handler handler) { add(HttpMethod::Options, pattern, std::move(handler)); }
-    void any(std::string_view pattern, Handler handler) { add(HttpMethod::Any, pattern, std::move(handler)); }
+    std::optional<std::string> add(HttpMethod method, std::string_view pattern, HttpHandler handler);
+    std::optional<std::string> get(std::string_view pattern, HttpHandler handler);
+    std::optional<std::string> post(std::string_view pattern, HttpHandler handler);
+    std::optional<std::string> put(std::string_view pattern, HttpHandler handler);
+    std::optional<std::string> patch(std::string_view pattern, HttpHandler handler);
+    std::optional<std::string> del(std::string_view pattern, HttpHandler handler);
+    std::optional<std::string> head(std::string_view pattern, HttpHandler handler);
+    std::optional<std::string> options(std::string_view pattern, HttpHandler handler);
+    std::optional<std::string> any(std::string_view pattern, HttpHandler handler);
 
     // target may be a full request target ("/a/b?x=1"); query string and fragment are ignored.
     MatchResult match(HttpMethod method, std::string_view target) const;
@@ -80,14 +76,14 @@ private:
 
     struct Node {
         bool has_handler() const;
-        const Handler* get_handler_for(HttpMethod method) const;
+        const HttpHandler* get_handler_for(HttpMethod method) const;
         std::string get_allowed_methods() const;
 
         std::map<std::string, std::unique_ptr<Node>, std::less<>> literals;
         std::unique_ptr<Node> param_node;
         std::string param_name;
         std::unique_ptr<Node> wildcard_node;
-        std::array<Handler, METHOD_COUNT> handlers;
+        std::array<HttpHandler, METHOD_COUNT> handlers;
     };
 
     static const Node* find_node(const Node* node, std::string_view path, Params& params, HttpMethod method, bool require_handler);

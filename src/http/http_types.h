@@ -167,6 +167,12 @@ inline std::string_view get_response_status(int status)
     }
 }
 
+inline std::string_view get_response_status(HttpStatus status)
+{
+    int s = static_cast<int>(status);
+    return get_response_status(s);
+}
+
 struct GeneralHeaderFields {
     static constexpr std::string_view CacheControl = "Cache-Control";
     static constexpr std::string_view Connection = "Connection";
