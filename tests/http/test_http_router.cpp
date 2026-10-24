@@ -19,17 +19,17 @@ void invoke(const HttpHandler& handler)
     HttpRequest request;
     HttpResponse response(discard);
 
-    auto task = handler(request, response);
+    auto task = handler->call(request, response);
     auto handle = task.release_handle();
     handle.resume();
 }
 
 HttpHandler tagged(std::string& hit, std::string label)
 {
-    return [&hit, label = std::move(label)](HttpRequest&, HttpResponse&) -> co_async<> {
+    return make_handler([&hit, label = std::move(label)](const HttpRequest&, HttpResponse&) -> co_async<> {
         hit = label;
         co_return;
-    };
+    });
 }
 
 }
@@ -49,7 +49,7 @@ TEST(HttpRouterTest, staticRoute)
     EXPECT_TRUE(match.params.empty());
     EXPECT_TRUE(match.allowed_methods.empty());
 
-    invoke(*match.handler);
+    invoke(match.handler);
     EXPECT_EQ(hit, "hello");
 }
 
@@ -90,14 +90,14 @@ TEST(HttpRouterTest, paramCapture)
     EXPECT_EQ(match.params.get("id").value(), "42");
     EXPECT_FALSE(match.params.get("missing").has_value());
 
-    invoke(*match.handler);
+    invoke(match.handler);
     EXPECT_EQ(hit, "user");
 }
 
 TEST(HttpRouterTest, multipleParamsKeepDeclarationOrder)
 {
     HttpRouter router;
-    router.get("/users/{id}/posts/{post}", [](HttpRequest&, HttpResponse&) -> co_async<> { co_return; });
+    router.get("/users/{id}/posts/{post}", make_handler([](const HttpRequest&, HttpResponse&) -> co_async<> { co_return; }));
 
     const auto match = router.match(HttpMethod::Get, "/users/42/posts/7/");
 
@@ -119,13 +119,13 @@ TEST(HttpRouterTest, staticSegmentHasPriorityOverParam)
     const auto me = router.match(HttpMethod::Get, "/users/me");
     ASSERT_NE(me.handler, nullptr);
     EXPECT_TRUE(me.params.empty());
-    invoke(*me.handler);
+    invoke(me.handler);
     EXPECT_EQ(hit, "me");
 
     const auto other = router.match(HttpMethod::Get, "/users/42");
     ASSERT_NE(other.handler, nullptr);
     EXPECT_EQ(other.params.get("id").value(), "42");
-    invoke(*other.handler);
+    invoke(other.handler);
     EXPECT_EQ(hit, "user");
 }
 
@@ -141,7 +141,7 @@ TEST(HttpRouterTest, backtracksFromStaticBranchToParam)
 
     ASSERT_NE(match.handler, nullptr);
     EXPECT_EQ(match.params.get("x").value(), "b");
-    invoke(*match.handler);
+    invoke(match.handler);
     EXPECT_EQ(hit, "param");
 }
 
@@ -164,7 +164,7 @@ TEST(HttpRouterTest, wildcardCapturesRemainder)
     ASSERT_NE(match.handler, nullptr);
     EXPECT_EQ(match.params.get("*").value(), "");
 
-    invoke(*match.handler);
+    invoke(match.handler);
     EXPECT_EQ(hit, "static");
 }
 
@@ -177,13 +177,13 @@ TEST(HttpRouterTest, staticAndWildcardCoexist)
 
     const auto special = router.match(HttpMethod::Get, "/files/special");
     ASSERT_NE(special.handler, nullptr);
-    invoke(*special.handler);
+    invoke(special.handler);
     EXPECT_EQ(hit, "special");
 
     const auto wildcard = router.match(HttpMethod::Get, "/files/a/b.txt");
     ASSERT_NE(wildcard.handler, nullptr);
     EXPECT_EQ(wildcard.params.get("*").value(), "a/b.txt");
-    invoke(*wildcard.handler);
+    invoke(wildcard.handler);
     EXPECT_EQ(hit, "wildcard");
 }
 
@@ -199,7 +199,7 @@ TEST(HttpRouterTest, headFallsBackToGet)
 
     ASSERT_NE(match.handler, nullptr);
     EXPECT_TRUE(match.path_matched);
-    invoke(*match.handler);
+    invoke(match.handler);
     EXPECT_EQ(hit, "get");
 }
 
@@ -213,7 +213,7 @@ TEST(HttpRouterTest, explicitHeadOverridesGet)
     const auto match = router.match(HttpMethod::Head, "/hello");
 
     ASSERT_NE(match.handler, nullptr);
-    invoke(*match.handler);
+    invoke(match.handler);
     EXPECT_EQ(hit, "head");
 }
 
@@ -226,13 +226,13 @@ TEST(HttpRouterTest, anyMethodAndSpecificMethodPreference)
 
     const auto post = router.match(HttpMethod::Post, "/echo");
     ASSERT_NE(post.handler, nullptr);
-    invoke(*post.handler);
+    invoke(post.handler);
     EXPECT_EQ(hit, "post");
 
     // Methods without their own registration fall back to Any.
     const auto get = router.match(HttpMethod::Get, "/echo");
     ASSERT_NE(get.handler, nullptr);
-    invoke(*get.handler);
+    invoke(get.handler);
     EXPECT_EQ(hit, "any");
 }
 
@@ -275,7 +275,7 @@ TEST(HttpRouterTest, unknownPathAndInvalidTarget)
 TEST(HttpRouterTest, pathsAreCaseSensitive)
 {
     HttpRouter router;
-    router.get("/Hello", [](HttpRequest&, HttpResponse&) -> co_async<> { co_return; });
+    router.get("/Hello", make_handler([](const HttpRequest&, HttpResponse&) -> co_async<> { co_return; }));
 
     EXPECT_TRUE(static_cast<bool>(router.match(HttpMethod::Get, "/Hello")));
     EXPECT_FALSE(static_cast<bool>(router.match(HttpMethod::Get, "/hello")));
@@ -290,7 +290,7 @@ TEST(HttpRouterTest, rootRoute)
     const auto match = router.match(HttpMethod::Get, "/");
 
     ASSERT_NE(match.handler, nullptr);
-    invoke(*match.handler);
+    invoke(match.handler);
     EXPECT_EQ(hit, "root");
 
     EXPECT_FALSE(static_cast<bool>(router.match(HttpMethod::Get, "/a")));

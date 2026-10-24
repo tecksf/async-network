@@ -26,13 +26,12 @@ private:
     co_async<std::expected<size_t, std::error_code>> pull_data();
     co_async<> send_protocol_error(const ParseError& error);
     co_async<> send_raw(std::string_view data);
-    void close_gracefully();
+    void close_gracefully() const;
 
     std::shared_ptr<HttpServerCore> server;
     std::shared_ptr<spdlog::logger> logger;
     const TcpWriteStream write_stream;
     const TcpReadStream read_stream;
-    std::vector<uint8_t> scratch;
     HttpBuffer input;
 
     bool eof = false;

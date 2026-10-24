@@ -97,6 +97,23 @@ inline bool equals_ignore_case(std::string_view left, std::string_view right)
     return true;
 }
 
+inline bool less_ignore_case(std::string_view left, std::string_view right)
+{
+    const size_t shared = left.size() < right.size() ? left.size() : right.size();
+
+    for (size_t index = 0; index < shared; ++index)
+    {
+        const auto lhs = static_cast<unsigned char>(to_lower(left[index]));
+        const auto rhs = static_cast<unsigned char>(to_lower(right[index]));
+        if (lhs != rhs)
+        {
+            return lhs < rhs;
+        }
+    }
+
+    return left.size() < right.size();
+}
+
 // Checks a comma separated field value (Connection, Expect, Transfer-Encoding...) for one token.
 inline bool has_token(std::string_view value, std::string_view token)
 {

@@ -93,7 +93,6 @@ private:
     size_t chunk_remaining = 0;
     size_t body_received = 0;
     size_t trailer_bytes = 0;
-    size_t body_scan = 0;
 };
 
 }

@@ -202,15 +202,16 @@ TEST(HttpParserTest, headerNamesAreCaseInsensitiveAndValuesTrimmed)
     EXPECT_EQ(fixture.request.get_header().size(), 3u);
 }
 
-TEST(HttpParserTest, repeatedHeadersArePreserved)
+TEST(HttpParserTest, repeatedHeadersAreMerged)
 {
     Fixture fixture;
 
     expect_complete(fixture.header("GET / HTTP/1.1\r\nHost: x\r\nX-Tag: a\r\nx-tag: b\r\n\r\n"));
 
-    EXPECT_EQ(fixture.request.get_header().count("X-Tag"), 2u);
-    EXPECT_EQ(fixture.request.get_header().joined("X-Tag"), "a, b");
-    EXPECT_EQ(fixture.request.get_header().get_all("x-TAG"), (std::vector<std::string>{"a", "b"}));
+    // Repeated names are case insensitive and merged into one comma separated value.
+    EXPECT_EQ(fixture.request.get_header().get("X-Tag"), std::optional<std::string>("a, b"));
+    EXPECT_EQ(fixture.request.get_header().get("x-TAG"), std::optional<std::string>("a, b"));
+    EXPECT_EQ(fixture.request.get_header().size(), 2u);
 }
 
 TEST(HttpParserTest, obsoleteLineFoldingIsRejected)

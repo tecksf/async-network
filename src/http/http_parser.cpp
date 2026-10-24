@@ -242,7 +242,8 @@ std::expected<HttpParser::Status, ParseError> HttpParser::verify_header(HttpBuff
 
     if (has_transfer_encoding)
     {
-        const auto encodings = http_header.joined(GeneralHeaderFields::TransferEncoding);
+        // Repeated fields were merged into one value, split them back into a token list.
+        const auto encodings = http_header.get(GeneralHeaderFields::TransferEncoding).value_or(std::string{});
         bool chunked = false;
 
         for (auto token: split(encodings, ','))
@@ -265,7 +266,10 @@ std::expected<HttpParser::Status, ParseError> HttpParser::verify_header(HttpBuff
         size_t length = 0;
         bool assigned = false;
 
-        for (const auto& raw: http_header.get_all(EntityHeaderFields::ContentLength))
+        // Repeated fields were merged into one value, every element must agree.
+        const auto raw_lengths = http_header.get(EntityHeaderFields::ContentLength).value_or(std::string{});
+
+        for (const auto raw: split(raw_lengths, ','))
         {
             const auto text = trim(raw);
             if (text.empty())
@@ -305,6 +309,8 @@ std::expected<HttpParser::Status, ParseError> HttpParser::verify_header(HttpBuff
     }
 
     input.consume(line_begin);
+
+    scan = 0;
     step = HeaderStep::Finish;
 
     return Status::Complete;
@@ -313,11 +319,11 @@ std::expected<HttpParser::Status, ParseError> HttpParser::verify_header(HttpBuff
 std::optional<HttpParser::Status> HttpParser::read_body_line(HttpBuffer& input, std::string_view& line, size_t limit)
 {
     const auto data = input.peek();
-    const auto position = data.find(CRLF, body_scan);
+    const auto position = data.find(CRLF, scan);
 
     if (position == std::string_view::npos)
     {
-        body_scan = (not data.empty() and data.back() == '\r') ? data.size() - 1 : data.size();
+        scan = (not data.empty() and data.back() == '\r') ? data.size() - 1 : data.size();
         if (data.size() > limit)
         {
             return std::nullopt;
@@ -365,7 +371,7 @@ std::expected<HttpParser::Status, ParseError> HttpParser::parse_chunk_size_line(
     }
 
     input.consume(consumed);
-    body_scan = 0;
+    scan = 0;
 
     if (value == 0)
     {
@@ -448,7 +454,7 @@ std::expected<HttpParser::Status, ParseError> HttpParser::parse_chunk_trailer(Ht
     const size_t consumed = line.size() + CRLF_LEN;
 
     input.consume(consumed);
-    body_scan = 0;
+    scan = 0;
     trailer_bytes += consumed;
 
     if (trailer_bytes > limits.max_header_bytes)

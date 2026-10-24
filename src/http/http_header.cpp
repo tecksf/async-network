@@ -6,137 +6,67 @@ namespace coro::net {
 
 void HttpHeader::set(std::string_view name, std::string_view value)
 {
-    for (auto& entry: fields)
+    const auto found = fields.find(name);
+    if (found != fields.end())
     {
-        if (equals_ignore_case(entry.name, name))
-        {
-            entry.name.assign(name);
-            entry.value.assign(value);
-            return;
-        }
+        // The first spelling of the name is kept, only the value is replaced.
+        found->second.assign(value);
+        return;
     }
 
-    fields.push_back(Entry{std::string(name), std::string(value)});
+    fields.emplace(std::string(name), std::string(value));
 }
 
 void HttpHeader::add(std::string_view name, std::string_view value)
 {
-    fields.push_back(Entry{std::string(name), std::string(value)});
+    const auto found = fields.find(name);
+    if (found == fields.end())
+    {
+        fields.emplace(std::string(name), std::string(value));
+        return;
+    }
+
+    // Repeated fields are merged into one comma separated value.
+    auto& merged = found->second;
+    merged.reserve(merged.size() + value.size() + 2);
+    merged.append(", ");
+    merged.append(value);
 }
 
 void HttpHeader::remove(std::string_view name)
 {
-    std::erase_if(fields, [name](const Entry& entry) {
-        return equals_ignore_case(entry.name, name);
-    });
+    const auto found = fields.find(name);
+    if (found != fields.end())
+    {
+        fields.erase(found);
+    }
 }
 
 bool HttpHeader::contains(std::string_view name) const
 {
-    for (const auto& entry: fields)
-    {
-        if (equals_ignore_case(entry.name, name))
-        {
-            return true;
-        }
-    }
-
-    return false;
+    return fields.contains(name);
 }
 
 bool HttpHeader::contains_token(std::string_view name, std::string_view token) const
 {
-    for (const auto& [header_line_name, header_line_value]: fields)
+    const auto found = fields.find(name);
+    if (found == fields.end())
     {
-        if (not equals_ignore_case(header_line_name, name))
-        {
-            continue;
-        }
-
-        if (has_token(header_line_value, token))
-        {
-            return true;;
-        }
+        return false;
     }
 
-    return false;
+    return has_token(found->second, token);
 }
 
 std::optional<std::string> HttpHeader::get(std::string_view name) const
 {
-    for (const auto& entry: fields)
+    const auto found = fields.find(name);
+    if (found == fields.end())
     {
-        if (equals_ignore_case(entry.name, name))
-        {
-            return entry.value;
-        }
+        return std::nullopt;
     }
 
-    return std::nullopt;
-}
-
-std::vector<std::string> HttpHeader::get_all(std::string_view name) const
-{
-    std::vector<std::string> values;
-
-    for (const auto& entry: fields)
-    {
-        if (equals_ignore_case(entry.name, name))
-        {
-            values.push_back(entry.value);
-        }
-    }
-
-    return values;
-}
-
-size_t HttpHeader::count(std::string_view name) const
-{
-    size_t total = 0;
-
-    for (const auto& entry: fields)
-    {
-        if (equals_ignore_case(entry.name, name))
-        {
-            ++total;
-        }
-    }
-
-    return total;
-}
-
-std::string HttpHeader::joined(std::string_view name, std::string_view separator) const
-{
-    std::string result;
-    bool first = true;
-
-    for (const auto& entry: fields)
-    {
-        if (not equals_ignore_case(entry.name, name))
-        {
-            continue;
-        }
-
-        if (not first)
-        {
-            result.append(separator);
-        }
-
-        result.append(entry.value);
-        first = false;
-    }
-
-    return result;
-}
-
-const std::vector<HttpHeader::Entry>& HttpHeader::entries() const
-{
-    return fields;
-}
-
-std::vector<HttpHeader::Entry>& HttpHeader::entries()
-{
-    return fields;
+    return found->second;
 }
 
 bool HttpHeader::empty() const

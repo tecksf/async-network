@@ -243,17 +243,16 @@ std::string HttpResponse::serialize_header(const Options& value) const
         }
     }
 
-    for (const auto& entry: header.entries())
-    {
+    header.visit_fields([&content, body_less](const std::string& field_name, const std::string& field_value) {
         if (body_less and
-            (equals_ignore_case(entry.name, EntityHeaderFields::ContentLength) or
-             equals_ignore_case(entry.name, GeneralHeaderFields::TransferEncoding)))
+            (equals_ignore_case(field_name, EntityHeaderFields::ContentLength) or
+             equals_ignore_case(field_name, GeneralHeaderFields::TransferEncoding)))
         {
-            continue;
+            return;
         }
 
-        std::format_to(std::back_inserter(content), "{}: {}\r\n", entry.name, entry.value);
-    }
+        std::format_to(std::back_inserter(content), "{}: {}\r\n", field_name, field_value);
+    });
 
     content.append(CRLF);
 

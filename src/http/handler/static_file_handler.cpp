@@ -186,7 +186,7 @@ HttpHandler make_static_handler(const std::string& root, const std::string& url_
     const std::filesystem::path base = std::filesystem::absolute(std::filesystem::path(root)).lexically_normal();
     const std::string prefix = normalize_prefix(url_prefix);
 
-    return [base, prefix, options](HttpRequest& request, HttpResponse& response)-> co_async<> {
+    return make_handler([base, prefix, options](const HttpRequest& request, HttpResponse& response)-> co_async<> {
         const std::string relative = percent_decode(relative_path(request.get_uri_path(), prefix));
 
         if (is_unsafe(relative))
@@ -217,7 +217,7 @@ HttpHandler make_static_handler(const std::string& root, const std::string& url_
 
         co_await send_file(response, target.string());
         co_return;
-    };
+    });
 }
 
 }

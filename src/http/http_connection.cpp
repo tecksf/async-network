@@ -2,7 +2,9 @@
 #include "http_response.h"
 #include "http_router.h"
 #include "http_utils.h"
+#include <cstdint>
 #include <expected>
+#include <span>
 #include <string>
 
 namespace coro::net {
@@ -30,7 +32,10 @@ co_async<> HttpConnection::serve(std::shared_ptr<HttpConnection> self)
 co_async<> HttpConnection::run()
 {
     const auto& config = server->config;
-    scratch.resize(config.read_chunk == 0 ? 8 * 1024 : config.read_chunk);
+    if (config.read_chunk != 0)
+    {
+        input.reserve(config.read_chunk);
+    }
 
     while (true)
     {
@@ -118,7 +123,7 @@ co_async<> HttpConnection::run()
 
         if (match.handler != nullptr)
         {
-            co_await (*match.handler)(request, response);
+            co_await match.handler->call(request, response);
         }
         else if (match.path_matched)
         {
@@ -147,7 +152,22 @@ co_async<std::expected<size_t, std::error_code>> HttpConnection::pull_data()
         co_return size_t{0};
     }
 
-    const auto result = co_await read_stream.read(std::span<uint8_t>(scratch.data(), scratch.size()));
+    input.compact();
+
+    auto space = input.write_space();
+    if (space.empty())
+    {
+        input.reserve(input.capacity() * 2);
+        space = input.write_space();
+    }
+
+    const size_t read_chunk = server->config.read_chunk;
+    if (read_chunk != 0 and read_chunk < space.size())
+    {
+        space = space.first(read_chunk);
+    }
+
+    const auto result = co_await read_stream.read(std::span<uint8_t>(reinterpret_cast<uint8_t*>(space.data()), space.size()));
     if (not result.has_value())
     {
         eof = true;
@@ -161,7 +181,7 @@ co_async<std::expected<size_t, std::error_code>> HttpConnection::pull_data()
         co_return 0;
     }
 
-    input.append(std::string_view(reinterpret_cast<const char*>(scratch.data()), static_cast<size_t>(count)));
+    input.commit(static_cast<size_t>(count));
     co_return static_cast<size_t>(count);
 }
 
@@ -219,7 +239,7 @@ co_async<> HttpConnection::send_raw(std::string_view data)
     co_return;
 }
 
-void HttpConnection::close_gracefully()
+void HttpConnection::close_gracefully() const
 {
     write_stream.shutdown();
 }

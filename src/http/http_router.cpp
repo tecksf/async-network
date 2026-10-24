@@ -62,29 +62,29 @@ bool HttpRouter::Node::has_handler() const
     return std::ranges::any_of(handlers, [](const HttpHandler& handler) { return handler != nullptr; });
 }
 
-const HttpHandler* HttpRouter::Node::get_handler_for(HttpMethod method) const
+HttpHandler HttpRouter::Node::get_handler_for(HttpMethod method) const
 {
     if (method == HttpMethod::Any)
     {
         const auto& any_handler = handlers[static_cast<size_t>(HttpMethod::Any)];
-        return any_handler ? &any_handler : nullptr;
+        return any_handler ? any_handler : nullptr;
     }
 
     if (const auto& exact_handler = handlers[static_cast<size_t>(method)]; exact_handler)
     {
-        return &exact_handler;
+        return exact_handler;
     }
 
     if (const auto& any_handler = handlers[static_cast<size_t>(HttpMethod::Any)]; any_handler)
     {
-        return &any_handler;
+        return any_handler;
     }
 
     if (method == HttpMethod::Head)
     {
         if (const auto& get_handler = handlers[static_cast<size_t>(HttpMethod::Get)]; get_handler)
         {
-            return &get_handler;
+            return get_handler;
         }
     }
 

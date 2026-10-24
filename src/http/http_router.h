@@ -38,7 +38,7 @@ public:
 
     struct MatchResult {
         HttpMethod method = HttpMethod::Get;
-        const HttpHandler* handler = nullptr;
+        HttpHandler handler = nullptr;
         Params params;
 
         // True when the path matched but the method was not registered; allowed_methods then lists the methods
@@ -76,7 +76,7 @@ private:
 
     struct Node {
         bool has_handler() const;
-        const HttpHandler* get_handler_for(HttpMethod method) const;
+        HttpHandler get_handler_for(HttpMethod method) const;
         std::string get_allowed_methods() const;
 
         std::map<std::string, std::unique_ptr<Node>, std::less<>> literals;
