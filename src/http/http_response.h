@@ -30,6 +30,11 @@ public:
     void set_content_type(std::string_view value);
     void set_options(const Options& value);
 
+    HttpResponse& status(HttpStatus status);
+    HttpResponse& field(std::string_view name, std::string_view value, bool replace = false);
+    HttpResponse& content_type(std::string_view value);
+    HttpResponse& keep_alive(bool value);
+
     co_async<> reply_header();
     co_async<> reply_text_header(std::string_view content);
     co_async<> reply_html_header(std::string_view content);

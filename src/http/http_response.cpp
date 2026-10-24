@@ -86,6 +86,46 @@ void HttpResponse::set_options(const Options& value)
     options = value;
 }
 
+HttpResponse& HttpResponse::status(HttpStatus status)
+{
+    status_code = static_cast<int>(status);
+    return *this;
+}
+
+HttpResponse& HttpResponse::field(std::string_view name, std::string_view value, bool replace)
+{
+    if (replace)
+    {
+        header.set(name, value);
+    }
+    else
+    {
+        header.add(name, value);
+    }
+
+    return *this;
+}
+
+HttpResponse& HttpResponse::content_type(std::string_view value)
+{
+    header.set(EntityHeaderFields::ContentType, value);
+    return *this;
+}
+
+HttpResponse& HttpResponse::keep_alive(bool value)
+{
+    if (value)
+    {
+        header.remove(GeneralHeaderFields::Connection);
+    }
+    else
+    {
+        header.set(GeneralHeaderFields::Connection, "close");
+    }
+
+    return *this;
+}
+
 bool HttpResponse::is_chunked() const
 {
     return header.contains_token(GeneralHeaderFields::TransferEncoding, "chunked");
