@@ -132,6 +132,135 @@ TEST(HttpParserTest, http10DoesNotRequireHostHeader)
 
     EXPECT_EQ(fixture.request.get_version(), (HttpVersion{1, 0}));
     EXPECT_EQ(fixture.request.get_uri_path(), "/legacy");
+    EXPECT_TRUE(fixture.request.get_host().get_name().empty());
+}
+
+//=================================== Host =====================================
+
+TEST(HttpParserTest, hostIsParsedIntoNameAndPort)
+{
+    Fixture fixture;
+
+    expect_complete(fixture.header("GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n"));
+
+    const auto& host = fixture.request.get_host();
+    EXPECT_EQ(host.get_name(), "example.com");
+    ASSERT_TRUE(host.get_port().has_value());
+    EXPECT_EQ(host.get_port().value(), 8080);
+    EXPECT_EQ(host.get_port_or(80), 8080);
+    EXPECT_FALSE(host.is_ip());
+    EXPECT_EQ(host.to_string(), "example.com:8080");
+}
+
+TEST(HttpParserTest, hostWithoutPortFallsBackToListenPort)
+{
+    Fixture fixture;
+
+    expect_complete(fixture.header("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"));
+
+    ASSERT_FALSE(fixture.request.get_host().get_name().empty());
+    EXPECT_FALSE(fixture.request.get_host().get_port().has_value());
+    EXPECT_EQ(fixture.request.get_host().get_port_or(8090), 8090);
+}
+
+TEST(HttpParserTest, hostAcceptsIpAddresses)
+{
+    for (const std::string value: {
+             std::string("127.0.0.1"),
+             std::string("127.0.0.1:8080"),
+             std::string("[::1]"),
+             std::string("[::1]:8080"),
+         })
+    {
+        SCOPED_TRACE(value);
+        Fixture fixture;
+
+        expect_complete(fixture.header("GET / HTTP/1.1\r\nHost: " + value + "\r\n\r\n"));
+
+        ASSERT_FALSE(fixture.request.get_host().get_name().empty());
+        EXPECT_TRUE(fixture.request.get_host().is_ip());
+    }
+}
+
+TEST(HttpParserTest, duplicateHostHeaderIsRejected)
+{
+    Fixture fixture;
+
+    expect_error(fixture.header("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"), HttpStatus::BadRequest);
+}
+
+TEST(HttpParserTest, duplicateSingleValueHeaderIsRejected)
+{
+    for (const std::string request: {
+             std::string("GET / HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1\r\nRange: bytes=2-3\r\n\r\n"),
+             std::string("GET / HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\ncontent-type: text/html\r\n\r\n"),
+         })
+    {
+        SCOPED_TRACE(request);
+        Fixture fixture;
+
+        expect_error(fixture.header(request), HttpStatus::BadRequest);
+    }
+}
+
+TEST(HttpParserTest, duplicateContentLengthKeepsConsistencyCheck)
+{
+    Fixture fixture;
+
+    expect_complete(fixture.header("POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\n"));
+    EXPECT_EQ(fixture.parser.get_body_size(), 3u);
+}
+
+TEST(HttpParserTest, invalidHostHeaderIsRejected)
+{
+    for (const std::string value: {
+             std::string(""),
+             std::string("a b"),
+             std::string("user@example.com"),
+             std::string("example.com:abc"),
+             std::string("example.com:70000"),
+             std::string("example.com:-1"),
+             std::string("/path"),
+             std::string("[::1"),
+             std::string("::1"),
+             std::string("example.com:8080:1"),
+         })
+    {
+        SCOPED_TRACE(value);
+        Fixture fixture;
+
+        expect_error(fixture.header("GET / HTTP/1.1\r\nHost: " + value + "\r\n\r\n"), HttpStatus::BadRequest);
+    }
+}
+
+TEST(HttpParserTest, hostMatchesIgnoreCase)
+{
+    const auto host = HttpHost::from("Example.COM:8080");
+    ASSERT_TRUE(host.has_value());
+
+    EXPECT_TRUE(host->matches(HttpHost::from("example.com:8080").value()));
+    EXPECT_TRUE(host->matches(HttpHost::from("EXAMPLE.com").value()));
+    EXPECT_FALSE(host->matches(HttpHost::from("example.com:9090").value()));
+    EXPECT_FALSE(host->matches(HttpHost::from("www.example.com").value()));
+
+    EXPECT_TRUE(host == HttpHost::from("example.com:8080").value());
+}
+
+TEST(HttpParserTest, hostFromRejectsMalformedValues)
+{
+    for (const std::string value: {
+             std::string(""),
+             std::string("  "),
+             std::string("a,b"),
+             std::string("host:0"),
+             std::string("host:"),
+             std::string("[::1]:"),
+             std::string("%zz"),
+         })
+    {
+        SCOPED_TRACE(value);
+        EXPECT_FALSE(HttpHost::from(value).has_value());
+    }
 }
 
 TEST(HttpParserTest, malformedRequestLinesAreRejected)
