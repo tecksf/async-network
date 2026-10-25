@@ -64,7 +64,7 @@ foreach (example_source IN LISTS EXAMPLE_SOURCES)
     get_filename_component(example_target "${example_source}" NAME_WE)
 
     add_executable(${example_target} "${example_source}")
-    target_link_libraries(${example_target} PRIVATE coro net)
+    target_link_libraries(${example_target} PRIVATE coro net http)
     set_target_properties(${example_target} PROPERTIES
         BUILD_RPATH "${LIBURING_LIBDIR}"
         BUILD_RPATH_USE_ORIGIN ON

@@ -75,6 +75,18 @@ co_async<> tcp_echo(std::string host)
 }
 ```
 
+### HTTP 服务
+
+`examples/http_server.cpp`（目标 `http_server`）把某个目录挂载到 HTTP 服务上：
+
+```cpp
+HttpServer server(logger);
+server.mount("/", "root");                       // 静态文件根目录为 ./root
+server.log_routes();
+
+co_await server.listen(host + ":8090");
+```
+
 ### 启动运行时
 
 ```cpp
@@ -191,8 +203,11 @@ runtime.block_on(co_main(user_logger, runtime.network_address()));
 ```
 async-network/
 ├── CMakeLists.txt
-├── main.cpp                     # 示例：UDP echo + TCP echo
 ├── config/network.conf          # 默认配置（构建时复制到输出目录）
+├── examples/                    # 可运行示例，每个文件一个可执行文件
+│   ├── http_server.cpp          # 静态文件 HTTP 服务，端口 8090
+│   ├── tcp_echo.cpp             # TCP echo，端口 7891
+│   └── udp_echo.cpp             # UDP echo，端口 7890
 ├── include/async/               # 对外头文件（coro.h / socket.h）
 ├── src/
 │   ├── async/                   # 协程运行时
@@ -238,12 +253,20 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 ```
 
+`examples/` 下的每个源文件都会生成一个位于 `build/` 的可执行文件：
+
+| 目标 | 说明 |
+| --- | --- |
+| `http_server` | 在 8090 端口上以 HTTP 提供 `./root` 目录 |
+| `tcp_echo` | 7891 端口的 TCP echo 服务 |
+| `udp_echo` | 7890 端口的 UDP echo 服务 |
+
 ```bash
 # 默认读取 config/network.conf，监听配置中的 host ip
-sudo ./build/async_network
+sudo ./build/http_server
 
 # 命令行覆盖配置项
-sudo ./build/async_network config=config/network.conf interface=eth0 ip=192.168.1.100
+sudo ./build/http_server config=config/network.conf interface=eth0 ip=192.168.1.100
 
 # 单元测试
 ./build/async_network_ut --gtest_color=yes
@@ -262,9 +285,9 @@ ip -4 addr show dev eth0
 sed -i 's/^ip=.*/ip=172.31.208.5/' config/network.conf
 
 # 3. 以 root 运行（AF_PACKET 需要 CAP_NET_RAW）
-sudo ./build/async_network
+sudo ./build/http_server
 #    不想用 sudo 时可以授予能力：
-sudo setcap cap_net_raw=eip ./build/async_network && ./build/async_network
+sudo setcap cap_net_raw=eip ./build/http_server && ./build/http_server
 ```
 
 测试时请注意：
@@ -275,13 +298,14 @@ sudo setcap cap_net_raw=eip ./build/async_network && ./build/async_network
   其他机器发起测试（WSL2 NAT 模式下宿主机可直接访问该地址）：
 
   ```powershell
-  Test-NetConnection 172.31.208.5 -Port 7891
+  Test-NetConnection 172.31.208.5 -Port 8090
   ```
 
   ```bash
   # 其他 Linux 主机
-  echo quit | nc -u 172.31.208.5 7890
-  nc 172.31.208.5 7891
+  curl http://172.31.208.5:8090/              # http_server
+  printf 'hello' | nc -w1 172.31.208.5 7891   # tcp_echo
+  echo quit | nc -u 172.31.208.5 7890         # udp_echo
   ```
 
 - 若 WSL2 虚拟网卡存在校验和卸载，收到的帧可能带无效校验和而被丢弃，可在配置中临时关闭校验：

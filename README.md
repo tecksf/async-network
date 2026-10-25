@@ -73,6 +73,18 @@ co_async<> tcp_echo(std::string host)
 }
 ```
 
+### HTTP server
+
+`examples/http_server.cpp` (target `http_server`) mounts a directory on the HTTP server:
+
+```cpp
+HttpServer server(logger);
+server.mount("/", "root");                       // static files served from ./root
+server.log_routes();
+
+co_await server.listen(host + ":8090");
+```
+
 ### Starting the runtime
 
 ```cpp
@@ -189,8 +201,11 @@ Most socket operations return `std::expected<T, std::error_code>`; test with `if
 ```
 async-network/
 ├── CMakeLists.txt
-├── main.cpp                     # sample: UDP echo + TCP echo
 ├── config/network.conf          # default configuration (copied to the build output)
+├── examples/                    # runnable samples, one executable per file
+│   ├── http_server.cpp          # static file HTTP server on :8090
+│   ├── tcp_echo.cpp             # TCP echo on :7891
+│   └── udp_echo.cpp             # UDP echo on :7890
 ├── include/async/               # public headers (coro.h / socket.h)
 ├── src/
 │   ├── async/                   # coroutine runtime
@@ -236,12 +251,20 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 ```
 
+Every file under `examples/` becomes an executable in `build/`:
+
+| Target | Description |
+| --- | --- |
+| `http_server` | serves `./root` over HTTP on port 8090 |
+| `tcp_echo` | TCP echo server on port 7891 |
+| `udp_echo` | UDP echo server on port 7890 |
+
 ```bash
 # Reads config/network.conf by default and listens on the configured host ip
-sudo ./build/async_network
+sudo ./build/http_server
 
 # Override configuration entries on the command line
-sudo ./build/async_network config=config/network.conf interface=eth0 ip=192.168.1.100
+sudo ./build/http_server config=config/network.conf interface=eth0 ip=192.168.1.100
 
 # Unit tests
 ./build/async_network_ut --gtest_color=yes
@@ -260,9 +283,9 @@ ip -4 addr show dev eth0
 sed -i 's/^ip=.*/ip=172.31.208.5/' config/network.conf
 
 # 3. Run as root (AF_PACKET needs CAP_NET_RAW)
-sudo ./build/async_network
+sudo ./build/http_server
 #    To avoid sudo, grant the capability instead:
-sudo setcap cap_net_raw=eip ./build/async_network && ./build/async_network
+sudo setcap cap_net_raw=eip ./build/http_server && ./build/http_server
 ```
 
 Notes for testing:
@@ -275,13 +298,14 @@ Notes for testing:
   reach the WSL2 address directly):
 
   ```powershell
-  Test-NetConnection 172.31.208.5 -Port 7891
+  Test-NetConnection 172.31.208.5 -Port 8090
   ```
 
   ```bash
   # from another Linux host
-  echo quit | nc -u 172.31.208.5 7890
-  nc 172.31.208.5 7891
+  curl http://172.31.208.5:8090/     # http_server
+  printf 'hello' | nc -w1 172.31.208.5 7891   # tcp_echo
+  echo quit | nc -u 172.31.208.5 7890         # udp_echo
   ```
 
 - If the WSL2 virtual NIC uses checksum offload, received frames may carry invalid checksums and get
