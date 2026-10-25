@@ -3,8 +3,10 @@
 
 #include <atomic>
 #include <string>
+#include <vector>
 #include <spdlog/spdlog.h>
 #include "http_router.h"
+#include "http_request.h"
 
 namespace coro::net {
 
@@ -22,6 +24,7 @@ struct HttpServerConfig {
     size_t max_connections = 1024;
     size_t read_chunk = 8 * 1024;
     std::string server_name = "async-network";
+    std::vector<HttpHost> allowed_hosts;
 };
 
 struct HttpServerCore {

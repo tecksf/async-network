@@ -153,6 +153,20 @@ void HttpServer::add_route(HttpMethod method, std::string_view pattern, HttpHand
     }
 }
 
+bool HttpServer::allow_host(std::string_view value)
+{
+    auto host = HttpHost::from(value);
+    if (not host.has_value())
+    {
+        logger->error("[http] invalid allowed host: {}", std::string(value));
+        return false;
+    }
+
+    server_core->config.allowed_hosts.push_back(std::move(host.value()));
+    logger->info("[http] accepting host {}", server_core->config.allowed_hosts.back().to_string());
+    return true;
+}
+
 void HttpServer::log_routes() const
 {
     const auto lines = server_core->router.describe();

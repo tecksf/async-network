@@ -64,9 +64,20 @@ co_async<> HttpConnection::run()
         }
 
         request.set_address(read_stream.get_local_address(), read_stream.get_remote_address());
+
+        if (not is_host_allowed(request))
+        {
+            logger->warn("[http] rejected host {}", request.get_host().to_string());
+            co_await send_protocol_error(ParseError(HttpStatus::MisdirectedRequest, "host not allowed"));
+            co_return;
+        }
+
         if (config.log_headers)
         {
-            logger->info("[http] request from {}:  {}", read_stream.get_remote_address().to_string(), request.get_request_header());
+            logger->info("[http] request from {} host={}:  {}",
+                         read_stream.get_remote_address().to_string(),
+                         request.get_host().to_string(),
+                         request.get_request_header());
         }
 
         if (parser.has_body() and request.expect_continue())
@@ -237,6 +248,32 @@ co_async<> HttpConnection::send_raw(std::string_view data)
     }
 
     co_return;
+}
+
+bool HttpConnection::is_host_allowed(const HttpRequest& request) const
+{
+    const auto& allowed = server->config.allowed_hosts;
+    if (allowed.empty())
+    {
+        return true;
+    }
+
+    const auto& host = request.get_host();
+
+    if (host.get_name().empty())
+    {
+        return false;
+    }
+
+    for (const auto& candidate: allowed)
+    {
+        if (host.matches(candidate))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void HttpConnection::close_gracefully() const

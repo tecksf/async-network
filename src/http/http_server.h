@@ -31,6 +31,7 @@ public:
     void any(std::string_view pattern, HttpHandler handler);
     void mount(std::string_view url_prefix, std::string root, StaticFileOptions options = {});
     void log_routes() const;
+    bool allow_host(std::string_view value);
 
 private:
     void add_route(HttpMethod method, std::string_view pattern, HttpHandler handler);

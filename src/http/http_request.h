@@ -1,7 +1,10 @@
 #ifndef ASYNC_NETWORK_HTTP_REQUEST_H
 #define ASYNC_NETWORK_HTTP_REQUEST_H
 
+#include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <common/ip_address.h>
 #include "http_types.h"
 #include "http_header.h"
@@ -31,11 +34,33 @@ enum class HttpBodyFraming {
     Chunked,
 };
 
+class HttpHost {
+public:
+    HttpHost() = default;
+    static std::optional<HttpHost> from(std::string_view value);
+
+    const std::string& get_name() const;
+    std::optional<uint16_t> get_port() const;
+    uint16_t get_port_or(uint16_t fallback) const;
+
+    bool is_ip() const;
+    bool is_literal() const;
+    bool matches(const HttpHost& other) const;
+    bool operator==(const HttpHost& other) const;
+    std::string to_string() const;
+
+private:
+    std::string name;
+    std::optional<uint16_t> port;
+    bool literal = false;
+};
+
 class HttpRequest {
 public:
     HttpMethod get_method() const;
     bool is_head() const;
     HttpVersion get_version() const;
+    const HttpHost& get_host() const;
     const HttpHeader& get_header() const;
     std::string get_request_header() const;
     std::string_view get_uri_path() const;
@@ -49,7 +74,8 @@ public:
     bool is_keep_alive() const;
 
     void set_request_line(HttpMethod method, std::string_view target, const HttpVersion& version);
-    void add_header_field(std::string_view name, std::string_view value);
+    bool add_header_field(std::string_view name, std::string_view value);
+    void set_host(HttpHost value);
     void set_address(const SocketAddress& local, const SocketAddress& remote);
     void set_body(std::string&& data);
     void reserve_body(size_t size);
@@ -64,6 +90,7 @@ private:
     QueryParams query_params;
 
     HttpHeader header;
+    HttpHost host;
     std::string body;
     SocketAddress local;
     SocketAddress remote;

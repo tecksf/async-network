@@ -218,14 +218,29 @@ std::expected<HttpParser::Status, ParseError> HttpParser::parse_header_line(std:
         return std::unexpected(ParseError(HttpStatus::RequestHeaderFieldsTooLarge, "too many header fields"));
     }
 
-    request.add_header_field(name, value);
+    if (not request.add_header_field(name, value))
+    {
+        return std::unexpected(ParseError(HttpStatus::BadRequest, "duplicate header field: " + std::string(name)));
+    }
+
     return Status::Complete;
 }
 
 std::expected<HttpParser::Status, ParseError> HttpParser::verify_header(HttpBuffer& input, HttpRequest& request)
 {
     const HttpHeader& http_header = request.get_header();
-    if (request.get_version().is_http11_or_later() and not http_header.contains(RequestHeaderFields::Host))
+
+    if (const auto host = http_header.get(RequestHeaderFields::Host); host.has_value())
+    {
+        auto parsed = HttpHost::from(host.value());
+        if (not parsed.has_value())
+        {
+            return std::unexpected(ParseError(HttpStatus::BadRequest, "invalid Host header"));
+        }
+
+        request.set_host(std::move(parsed.value()));
+    }
+    else if (request.get_version().is_http11_or_later())
     {
         return std::unexpected(ParseError(HttpStatus::BadRequest, "missing Host header"));
     }
