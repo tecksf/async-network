@@ -106,21 +106,32 @@ co_async<> LinkManager::on_ethernet_frame_received(const SocketBuffer& inbound) 
 
     // logger->debug("source mac={}, destination mac={}", frame.get_source_mac().to_string(), mac.to_string());
 
+    LayerContext context;
+    context.protocol = frame.get_protocol();
+    context.remote_mac = frame.get_source_mac();
+
     switch (frame.get_protocol())
     {
         case Protocol::ARP:
-            co_await link->on_arp_packet_received(buffer);
+            co_await link->on_arp_packet_received(buffer, context);
             break;
         case Protocol::IPv4:
-            co_await inet->on_ipv4_packet_received(buffer);
+            co_await inet->on_ipv4_packet_received(buffer, context);
             break;
         default:
             break;
     }
 }
 
-co_async<> LinkManager::async_send_ethernet_frame(const SocketBuffer& outbound, const EthernetContext& ctx) const
+co_async<> LinkManager::async_send_ethernet_frame(const SocketBuffer& outbound, const LayerContext& ctx) const
 {
+    if (not ctx.remote_mac.has_value())
+    {
+        logger->error("Ethernet frame without a destination MAC, protocol={}, will drop",
+                      static_cast<int>(ctx.protocol));
+        co_return;
+    }
+
     SocketBuffer frame_buffer = outbound;
     if (frame_buffer->size() > static_cast<size_t>(config.ethernet_mtu))
     {
@@ -130,7 +141,7 @@ co_async<> LinkManager::async_send_ethernet_frame(const SocketBuffer& outbound, 
 
     EthernetFrame frame(frame_buffer->allocate(EthernetFrame::HeaderSize));
     frame.set_protocol(ctx.protocol);
-    frame.set_destination_mac(ctx.destination);
+    frame.set_destination_mac(ctx.remote_mac.value());
     frame.set_source_mac(link->get_host_mac());
 
     auto msg = frame_buffer->get_header_payload();
@@ -138,7 +149,7 @@ co_async<> LinkManager::async_send_ethernet_frame(const SocketBuffer& outbound, 
     co_return;
 }
 
-co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound) const
+co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound, const LayerContext& ctx) const
 {
     SocketBuffer buffer = inbound;
     const auto input = ArpPacket::build(buffer->get_header_payload());
@@ -165,28 +176,30 @@ co_async<> LinkManager::on_arp_packet_received(const SocketBuffer& inbound) cons
         co_return;
     }
 
-    ArpContext context;
+    LayerContext context = ctx;
     context.protocol = Protocol::ARP;
-    context.operate_code = ArpPacket::ReplyOperation;
-    context.ip = ip;
-    context.mac = mac;
+    context.remote_ip = ip;
+    context.remote_mac = mac;
 
-    co_await async_send_arp_packet(buffer, context);
+    co_await async_send_arp_packet(buffer, context, ArpPacket::ReplyOperation);
 }
 
-co_async<> LinkManager::async_send_arp_packet(const SocketBuffer& outbound, const ArpContext& ctx) const
+co_async<> LinkManager::async_send_arp_packet(const SocketBuffer& outbound, const LayerContext& ctx,
+                                              uint16_t operation) const
 {
+    const MacAddress target_mac = ctx.remote_mac.value_or(MacAddress::Broadcast);
+
     SocketBuffer frame = outbound;
     ArpPacket packet(frame->allocate(ArpPacket::HeaderSize), true);
-    packet.set_operate_code(ctx.operate_code);
-    packet.set_target_ip(ctx.ip);
-    packet.set_target_mac(ctx.mac);
+    packet.set_operate_code(operation);
+    packet.set_target_ip(ctx.remote_ip);
+    packet.set_target_mac(target_mac);
     packet.set_sender_mac(link->get_host_mac());
     packet.set_sender_ip(inet->get_host_ip());
 
-    EthernetContext context;
-    context.protocol = ctx.protocol;
-    context.destination = ctx.mac;
+    LayerContext context = ctx;
+    context.protocol = Protocol::ARP;
+    context.remote_mac = target_mac;
 
     co_await link->async_send_ethernet_frame(frame, context);
 }
@@ -195,13 +208,13 @@ co_async<> LinkManager::async_send_arp_request_operation(IpAddress ip) const
 {
     uint8_t data[64];
     SocketBuffer outbound = SocketBuffer::make_outbound_view(data, sizeof(data));
-    ArpContext context;
-    context.protocol = Protocol::ARP;
-    context.operate_code = ArpPacket::RequestOperation;
-    context.ip = ip;
-    context.mac = MacAddress::Broadcast;
 
-    co_await async_send_arp_packet(outbound, context);
+    LayerContext context;
+    context.protocol = Protocol::ARP;
+    context.remote_ip = ip;
+    context.remote_mac = MacAddress::Broadcast;
+
+    co_await async_send_arp_packet(outbound, context, ArpPacket::RequestOperation);
 }
 
 }

@@ -12,7 +12,7 @@ Icmpv4Manager::~Icmpv4Manager()
 {
 }
 
-co_async<> Icmpv4Manager::on_icmp_v4_packet_received(const SocketBuffer& inbound, const IcmpContext& ctx) const
+co_async<> Icmpv4Manager::on_icmp_v4_packet_received(const SocketBuffer& inbound, const LayerContext& ctx) const
 {
     SocketBuffer buffer = inbound;
     const auto input = Icmpv4Packet::build(buffer->get_header_payload());
@@ -29,17 +29,16 @@ co_async<> Icmpv4Manager::on_icmp_v4_packet_received(const SocketBuffer& inbound
         co_return;
     }
 
-    IcmpContext context = ctx;
+    LayerContext context = ctx;
     context.payload = packet.getPayload();
-    context.icmp_type = static_cast<int>(packet.get_type());
 
-    co_await async_send_icmp_v4_packet(buffer, context);
+    co_await async_send_icmp_v4_packet(buffer, context, packet.get_type());
 }
 
-co_async<> Icmpv4Manager::async_send_icmp_v4_packet(const SocketBuffer& outbound, const IcmpContext& ctx) const
+co_async<> Icmpv4Manager::async_send_icmp_v4_packet(const SocketBuffer& outbound, const LayerContext& ctx,
+                                                    IcmpType type) const
 {
     SocketBuffer buffer = outbound;
-    IcmpType type = static_cast<IcmpType>(ctx.icmp_type);
     switch (type)
     {
         case IcmpType::EchoReply:
@@ -67,9 +66,8 @@ co_async<> Icmpv4Manager::async_send_icmp_v4_packet(const SocketBuffer& outbound
             break;
     }
 
-    Ipv4Context context;
+    LayerContext context = ctx;
     context.protocol = Protocol::ICMPv4;
-    context.destination = ctx.source;
 
     co_await inet->async_send_ipv4_packet(buffer, context);
 }

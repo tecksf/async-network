@@ -50,9 +50,9 @@ public:
                 const Ipv4Config& config);
     ~Ipv4Manager();
 
-    co_async<> on_ipv4_packet_received(const SocketBuffer& inbound);
-    co_async<> async_send_ipv4_packet(const SocketBuffer& outbound, const Ipv4Context& ctx);
-    co_async<> async_send_ipv4_packet(const std::vector<SocketBuffer>& outbounds, const Ipv4Context& ctx);
+    co_async<> on_ipv4_packet_received(const SocketBuffer& inbound, const LayerContext& ctx);
+    co_async<> async_send_ipv4_packet(const SocketBuffer& outbound, const LayerContext& ctx);
+    co_async<> async_send_ipv4_packet(const std::vector<SocketBuffer>& outbounds, const LayerContext& ctx);
 
 private:
     co_async<std::optional<MacAddress>> async_retrieve_mac_address(const IpAddress& ip) const;

@@ -231,6 +231,40 @@ void TcpSession::set_peer_mss(uint16_t mss)
                    std::memory_order_relaxed);
 }
 
+void TcpSession::update_remote_mac(const LayerContext& ctx)
+{
+    if (not ctx.remote_mac.has_value())
+    {
+        return;
+    }
+
+    const MacAddress& mac = ctx.remote_mac.value();
+    remote_mac.store(mac.to_u64(), std::memory_order_relaxed);
+    send_window->update_remote_mac(mac);
+}
+
+std::optional<MacAddress> TcpSession::get_remote_mac() const
+{
+    const uint64_t mac = remote_mac.load(std::memory_order_relaxed);
+    if (mac == 0)
+    {
+        return std::nullopt;
+    }
+
+    return MacAddress(mac);
+}
+
+LayerContext TcpSession::make_context() const
+{
+    LayerContext context;
+    context.protocol = Protocol::TCP;
+    context.remote_ip = remote.ip;
+    context.remote_mac = get_remote_mac();
+    context.local_port = local.port;
+    context.remote_port = remote.port;
+    return context;
+}
+
 void TcpSession::update_peer_mss(const TcpSegment& header)
 {
     if (const auto mss = header.get_all_options().mss)
@@ -240,8 +274,11 @@ void TcpSession::update_peer_mss(const TcpSegment& header)
     }
 }
 
-TcpSessionResult TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload)
+TcpSessionResult TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload,
+                                                const LayerContext& ctx)
 {
+    update_remote_mac(ctx);
+
     std::lock_guard guard(session_mutex);
 
     if (header.is_reset())
@@ -706,10 +743,7 @@ std::optional<TcpStateTransition> TcpSession::terminate_session(std::errc ec, bo
         auto outbound = allocate_socket_buffer();
         SocketBuffer frame = compose_tcp_segment(outbound, TcpSegment::FLAG_RST | TcpSegment::FLAG_ACK,
                                                  sequence_number, nullptr);
-        TcpContext context{};
-        context.ip = remote.ip;
-        context.protocol = Protocol::TCP;
-        app->sumit_task(trans->async_send_tcp_segment(frame, context));
+        app->sumit_task(trans->async_send_tcp_segment(frame, make_context()));
     }
     else
     {
@@ -885,12 +919,9 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
     // that byte and recover the window information, otherwise the connection would stay stuck at a
     // zero window.
     SocketBuffer outbound = compose_tcp_segment(probe, TcpSegment::FLAG_ACK | TcpSegment::FLAG_PSH, target->sequence_number);
-    TcpContext context{};
-    context.ip = remote.ip;
-    context.protocol = Protocol::TCP;
     send_window->note_probe_sent(target->sequence_number);
 
-    app->sumit_task(trans->async_send_tcp_segment(outbound, context));
+    app->sumit_task(trans->async_send_tcp_segment(outbound, make_context()));
 
     logger->debug("===> TCP session [{0}] zero window probe sent at seq {1}", session_id, target->sequence_number);
 }

@@ -22,6 +22,25 @@ TcpSendWindow::~TcpSendWindow()
 {
 }
 
+void TcpSendWindow::update_remote_mac(const MacAddress& mac)
+{
+    remote_mac.store(mac.to_u64(), std::memory_order_relaxed);
+}
+
+LayerContext TcpSendWindow::make_context() const
+{
+    LayerContext context;
+    context.protocol = Protocol::TCP;
+    context.remote_ip = destination_ip;
+
+    if (const uint64_t mac = remote_mac.load(std::memory_order_relaxed); mac != 0)
+    {
+        context.remote_mac = MacAddress(mac);
+    }
+
+    return context;
+}
+
 void TcpSendWindow::cancel_transmit()
 {
     transmit_cancelled.store(true, std::memory_order_release);
@@ -96,10 +115,6 @@ void TcpSendWindow::push_outbound_into_tx_queue(const SocketBuffer& outbound, co
 
 co_async<> TcpSendWindow::background_tx_queue_transmit_worker(const std::shared_ptr<TcpSendWindow> window)
 {
-    TcpContext context{};
-    context.ip = window->destination_ip;
-    context.protocol = Protocol::TCP;
-
     while (true)
     {
         if (window->transmit_cancelled.load(std::memory_order_acquire))
@@ -121,7 +136,7 @@ co_async<> TcpSendWindow::background_tx_queue_transmit_worker(const std::shared_
             window->tx_queue.pop_front();
         }
 
-        co_await window->trans->async_send_tcp_segment(item.outbound, context);
+        co_await window->trans->async_send_tcp_segment(item.outbound, window->make_context());
 
         if (item.owner)
         {

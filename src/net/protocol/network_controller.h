@@ -51,16 +51,16 @@ public:
     void sumit_task(std::coroutine_handle<> h) override;
     link::RetrieveMacAwaiter retrieve_mac_address(const IpAddress& ip) override;
     co_async<> on_ethernet_frame_received(SocketBuffer inbound) const override;
-    co_async<> on_arp_packet_received(const SocketBuffer& inbound) const override;
-    co_async<> on_ipv4_packet_received(const SocketBuffer& inbound) const override;
-    co_async<> async_send_ethernet_frame(const SocketBuffer& outbound, const link::EthernetContext& ctx) const override;
-    co_async<> async_send_arp_packet(const SocketBuffer& outbound, const link::ArpContext& ctx) const override;
-    co_async<> async_send_ipv4_packet(const SocketBuffer outbound, const inet::Ipv4Context ctx) override;
-    co_async<> async_send_ipv4_packet(const std::vector<SocketBuffer> outbounds, const inet::Ipv4Context ctx) override;
-    co_async<> async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const trans::UdpContext ctx) override;
-    co_async<> on_udp_segment_received(const SocketBuffer& inbound, const trans::UdpContext& ctx) override;
-    co_async<> on_tcp_segment_received(const SocketBuffer& inbound, const trans::TcpContext& ctx) override;
-    co_async<> async_send_tcp_segment(const SocketBuffer outbound, const trans::TcpContext ctx) override;
+    co_async<> on_arp_packet_received(const SocketBuffer& inbound, const LayerContext& ctx) const override;
+    co_async<> on_ipv4_packet_received(const SocketBuffer& inbound, const LayerContext& ctx) const override;
+    co_async<> async_send_ethernet_frame(const SocketBuffer& outbound, const LayerContext& ctx) const override;
+    co_async<> async_send_arp_packet(const SocketBuffer& outbound, const LayerContext& ctx, uint16_t operation) const override;
+    co_async<> async_send_ipv4_packet(const SocketBuffer outbound, const LayerContext ctx) override;
+    co_async<> async_send_ipv4_packet(const std::vector<SocketBuffer> outbounds, const LayerContext ctx) override;
+    co_async<> async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const LayerContext ctx) override;
+    co_async<> on_udp_segment_received(const SocketBuffer& inbound, const LayerContext& ctx) override;
+    co_async<> on_tcp_segment_received(const SocketBuffer& inbound, const LayerContext& ctx) override;
+    co_async<> async_send_tcp_segment(const SocketBuffer outbound, const LayerContext ctx) override;
 
 private:
     using Block = uint8_t [MAX_BLOCK_SIZE];

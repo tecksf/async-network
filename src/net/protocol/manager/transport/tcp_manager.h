@@ -23,8 +23,8 @@ public:
     ~TcpManager() override;
     void on_session_closed(std::shared_ptr<TcpSession> session, bool sync = false) override;
 
-    co_async<> on_tcp_segment_received(const SocketBuffer& inbound, const TcpContext& ctx);
-    co_async<> async_send_tcp_segment(const SocketBuffer outbound, const TcpContext ctx) const;
+    co_async<> on_tcp_segment_received(const SocketBuffer& inbound, const LayerContext& ctx);
+    co_async<> async_send_tcp_segment(const SocketBuffer outbound, const LayerContext ctx) const;
     std::shared_ptr<spdlog::logger> get_logger() const;
     app::ApplicationService* get_app() const;
     trans::TransportService* get_trans() const;

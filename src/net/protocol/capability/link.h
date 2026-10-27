@@ -9,16 +9,6 @@
 
 namespace coro::net::link {
 
-struct EthernetContext : LayerContext {
-    MacAddress destination;
-};
-
-struct ArpContext : LayerContext {
-    uint16_t operate_code;
-    IpAddress ip;
-    MacAddress mac;
-};
-
 class LinkEventRegister {
 public:
     struct Context {
@@ -66,9 +56,10 @@ public:
     virtual void update_address_mapping(const IpAddress& ip, const MacAddress& mac) = 0;
     virtual RetrieveMacAwaiter retrieve_mac_address(const IpAddress& ip) = 0;
     virtual co_async<> on_ethernet_frame_received(SocketBuffer inbound) const = 0;
-    virtual co_async<> on_arp_packet_received(const SocketBuffer& inbound) const = 0;
-    virtual co_async<> async_send_arp_packet(const SocketBuffer& outbound, const ArpContext& ctx) const = 0;
-    virtual co_async<> async_send_ethernet_frame(const SocketBuffer& outbound, const EthernetContext& ctx) const = 0;
+    virtual co_async<> on_arp_packet_received(const SocketBuffer& inbound, const LayerContext& ctx) const = 0;
+    virtual co_async<> async_send_arp_packet(const SocketBuffer& outbound, const LayerContext& ctx,
+                                             uint16_t operation) const = 0;
+    virtual co_async<> async_send_ethernet_frame(const SocketBuffer& outbound, const LayerContext& ctx) const = 0;
 };
 
 }

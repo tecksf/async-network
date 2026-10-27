@@ -40,7 +40,7 @@ Ipv4Manager::~Ipv4Manager()
 {
 }
 
-co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
+co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound, const LayerContext& ctx)
 {
     SocketBuffer buffer = inbound;
     const auto input = Ipv4Packet::build(buffer->get_header_payload());
@@ -82,23 +82,22 @@ co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
         }
     }
 
-    Protocol protocol = packet.get_protocol();
+    const Protocol protocol = packet.get_protocol();
+
+    LayerContext context = ctx;
+    context.protocol = protocol;
+    context.remote_ip = packet.get_source_ip();
+
     if (protocol == Protocol::ICMPv4)
     {
-        IcmpContext context;
-        context.source = packet.get_source_ip();
         co_await icmp_manager.on_icmp_v4_packet_received(whole_inbound, context);
     }
     else if (protocol == Protocol::UDP)
     {
-        trans::UdpContext context;
-        context.ip = packet.get_source_ip();
         co_await trans->on_udp_segment_received(whole_inbound, context);
     }
     else if (protocol == Protocol::TCP)
     {
-        trans::TcpContext context;
-        context.ip = packet.get_source_ip();
         co_await trans->on_tcp_segment_received(whole_inbound, context);
     }
     else
@@ -107,17 +106,21 @@ co_async<> Ipv4Manager::on_ipv4_packet_received(const SocketBuffer& inbound)
     }
 }
 
-co_async<> Ipv4Manager::async_send_ipv4_packet(const SocketBuffer& outbound, const Ipv4Context& ctx)
+co_async<> Ipv4Manager::async_send_ipv4_packet(const SocketBuffer& outbound, const LayerContext& ctx)
 {
-    std::optional<MacAddress> mac = co_await async_retrieve_mac_address(ctx.destination);
-    if (!mac.has_value())
+    std::optional<MacAddress> mac = ctx.remote_mac;
+    if (not mac.has_value())
     {
-        co_return;
+        mac = co_await async_retrieve_mac_address(ctx.remote_ip);
+        if (not mac.has_value())
+        {
+            co_return;
+        }
     }
 
-    link::EthernetContext context;
+    LayerContext context = ctx;
     context.protocol = Protocol::IPv4;
-    context.destination = mac.value();
+    context.remote_mac = mac;
 
     SocketBuffer buffer = outbound;
 
@@ -127,13 +130,13 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const SocketBuffer& outbound, con
     packet.set_protocol(ctx.protocol);
     packet.set_time_to_live(static_cast<uint8_t>(config.time_to_live));
     packet.set_source_ip(inet->get_host_ip());
-    packet.set_destination_ip(ctx.destination);
+    packet.set_destination_ip(ctx.remote_ip);
     packet.seal();
 
     co_await link->async_send_ethernet_frame(buffer, context);
 }
 
-co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& outbounds, const Ipv4Context& ctx)
+co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& outbounds, const LayerContext& ctx)
 {
     const size_t fragment_count = outbounds.size();
     if (fragment_count == 1)
@@ -142,15 +145,19 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& 
         co_return;
     }
 
-    std::optional<MacAddress> mac = co_await async_retrieve_mac_address(ctx.destination);
-    if (!mac.has_value())
+    std::optional<MacAddress> mac = ctx.remote_mac;
+    if (not mac.has_value())
     {
-        co_return;
+        mac = co_await async_retrieve_mac_address(ctx.remote_ip);
+        if (not mac.has_value())
+        {
+            co_return;
+        }
     }
 
-    link::EthernetContext context;
+    LayerContext context = ctx;
     context.protocol = Protocol::IPv4;
-    context.destination = mac.value();
+    context.remote_mac = mac;
 
     size_t offset = 0;
     size_t current = 1;
@@ -167,7 +174,7 @@ co_async<> Ipv4Manager::async_send_ipv4_packet(const std::vector<SocketBuffer>& 
         packet.set_protocol(ctx.protocol);
         packet.set_time_to_live(static_cast<uint8_t>(config.time_to_live));
         packet.set_source_ip(inet->get_host_ip());
-        packet.set_destination_ip(ctx.destination);
+        packet.set_destination_ip(ctx.remote_ip);
 
         if (current > 1 && current == fragment_count)
         {

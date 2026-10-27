@@ -16,7 +16,7 @@ TcpManager::~TcpManager()
 {
 }
 
-co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, const TcpContext& ctx)
+co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, const LayerContext& ctx)
 {
     const auto segment = trans::TcpSegment::build(inbound->get_header_payload());
     if (!segment.has_value())
@@ -25,7 +25,7 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     }
 
     trans::FakeHeader fake_header;
-    fake_header.set_source_ip(ctx.ip);
+    fake_header.set_source_ip(ctx.remote_ip);
     fake_header.set_destination_ip(inet->get_host_ip());
     fake_header.set_protocol(Protocol::TCP);
     fake_header.set_length(inbound->size());
@@ -44,16 +44,21 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
 
     TcpSocketHandle handle;
     handle.local = {inet->get_host_ip(), header.get_destination_port()};
-    handle.remote = {ctx.ip, header.get_source_port()};
+    handle.remote = {ctx.remote_ip, header.get_source_port()};
+
+    LayerContext context = ctx;
+    context.protocol = Protocol::TCP;
+    context.local_port = header.get_destination_port();
+    context.remote_port = header.get_source_port();
 
     if (auto conn_session = find_connection_session(handle))
     {
-        auto result = conn_session->process_tcp_segment(header, payload);
+        auto result = conn_session->process_tcp_segment(header, payload, context);
         dispatch_session_result(conn_session, result);
     }
     else if (auto listen_session = find_listen_session(handle.local))
     {
-        auto [conn_session, waiter] = listen_session->process_tcp_segment(header, payload, handle.remote);
+        auto [conn_session, waiter] = listen_session->process_tcp_segment(header, payload, context);
         if (conn_session && waiter)
         {
             add_new_connection_session(conn_session);
@@ -64,11 +69,10 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
     }
 }
 
-co_async<> TcpManager::async_send_tcp_segment(const SocketBuffer outbound, const TcpContext ctx) const
+co_async<> TcpManager::async_send_tcp_segment(const SocketBuffer outbound, const LayerContext ctx) const
 {
-    inet::Ipv4Context context;
+    LayerContext context = ctx;
     context.protocol = Protocol::TCP;
-    context.destination = ctx.ip;
     co_await inet->async_send_ipv4_packet(outbound, context);
 }
 

@@ -439,52 +439,53 @@ co_async<> NetworkController::on_ethernet_frame_received(SocketBuffer inbound) c
     co_await link_manager->on_ethernet_frame_received(inbound);
 }
 
-co_async<> NetworkController::on_arp_packet_received(const SocketBuffer& inbound) const
+co_async<> NetworkController::on_arp_packet_received(const SocketBuffer& inbound, const LayerContext& ctx) const
 {
-    co_await link_manager->on_arp_packet_received(inbound);
+    co_await link_manager->on_arp_packet_received(inbound, ctx);
 }
 
-co_async<> NetworkController::async_send_arp_packet(const SocketBuffer& outbound, const link::ArpContext& ctx) const
+co_async<> NetworkController::async_send_arp_packet(const SocketBuffer& outbound, const LayerContext& ctx,
+                                                    uint16_t operation) const
 {
-    co_await link_manager->async_send_arp_packet(outbound, ctx);
+    co_await link_manager->async_send_arp_packet(outbound, ctx, operation);
 }
 
-co_async<> NetworkController::async_send_ethernet_frame(const SocketBuffer& outbound, const link::EthernetContext& ctx) const
+co_async<> NetworkController::async_send_ethernet_frame(const SocketBuffer& outbound, const LayerContext& ctx) const
 {
     co_await link_manager->async_send_ethernet_frame(outbound, ctx);
 }
 
-co_async<> NetworkController::on_ipv4_packet_received(const SocketBuffer& inbound) const
+co_async<> NetworkController::on_ipv4_packet_received(const SocketBuffer& inbound, const LayerContext& ctx) const
 {
-    co_await ipv4_manager->on_ipv4_packet_received(inbound);
+    co_await ipv4_manager->on_ipv4_packet_received(inbound, ctx);
 }
 
-co_async<> NetworkController::async_send_ipv4_packet(const SocketBuffer outbound, const inet::Ipv4Context ctx)
+co_async<> NetworkController::async_send_ipv4_packet(const SocketBuffer outbound, const LayerContext ctx)
 {
     co_await ipv4_manager->async_send_ipv4_packet(outbound, ctx);
 }
 
-co_async<> NetworkController::async_send_ipv4_packet(const std::vector<SocketBuffer> outbounds, const inet::Ipv4Context ctx)
+co_async<> NetworkController::async_send_ipv4_packet(const std::vector<SocketBuffer> outbounds, const LayerContext ctx)
 {
     co_await ipv4_manager->async_send_ipv4_packet(outbounds, ctx);
 }
 
-co_async<> NetworkController::async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const trans::UdpContext ctx)
+co_async<> NetworkController::async_send_udp_segment(const std::vector<SocketBuffer> outbounds, const LayerContext ctx)
 {
     co_await udp_manager->async_send_udp_segment(outbounds, ctx);
 }
 
-co_async<> NetworkController::on_udp_segment_received(const SocketBuffer& inbound, const trans::UdpContext& ctx)
+co_async<> NetworkController::on_udp_segment_received(const SocketBuffer& inbound, const LayerContext& ctx)
 {
     co_await udp_manager->on_udp_segment_received(inbound, ctx);
 }
 
-co_async<> NetworkController::on_tcp_segment_received(const SocketBuffer& inbound, const trans::TcpContext& ctx)
+co_async<> NetworkController::on_tcp_segment_received(const SocketBuffer& inbound, const LayerContext& ctx)
 {
     co_await tcp_manager->on_tcp_segment_received(inbound, ctx);
 }
 
-co_async<> NetworkController::async_send_tcp_segment(const SocketBuffer outbounds, const trans::TcpContext ctx)
+co_async<> NetworkController::async_send_tcp_segment(const SocketBuffer outbounds, const LayerContext ctx)
 {
     co_await tcp_manager->async_send_tcp_segment(outbounds, ctx);
 }

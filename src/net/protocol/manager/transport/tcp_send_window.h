@@ -83,6 +83,8 @@ public:
     TcpSendWindow(const TcpSendWindow&) = delete;
     TcpSendWindow& operator=(const TcpSendWindow&) = delete;
 
+    void update_remote_mac(const MacAddress& mac);
+
     void push_outbound(const TcpSegment& segment, const SocketBuffer& outbound);
     void update_peer_window(uint16_t window, uint32_t segment_sequence, uint32_t segment_ack);
     void acknowledge(uint32_t ack_number);
@@ -104,6 +106,7 @@ public:
     static co_async<> background_tx_queue_transmit_worker(std::shared_ptr<TcpSendWindow> window);
 
 private:
+    LayerContext make_context() const;
     co_async<> retransmit_segment(std::shared_ptr<TcpInFlightSegment> segment);
     bool fast_retransmit(uint32_t ack_number);
     void cancel_pending_segments();
@@ -136,6 +139,7 @@ private:
     trans::TransportService* trans;
     std::shared_ptr<spdlog::logger> logger;
     const IpAddress destination_ip;
+    std::atomic<uint64_t> remote_mac{0};
     std::weak_ptr<TcpSendEvents> events;
 
     const int max_retransmissions;

@@ -129,7 +129,12 @@ public:
 
     void activate_transmit();
 
-    [[nodiscard]] TcpSessionResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload);
+    void update_remote_mac(const LayerContext& ctx);
+    std::optional<MacAddress> get_remote_mac() const;
+    LayerContext make_context() const;
+
+    [[nodiscard]] TcpSessionResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload,
+                                                      const LayerContext& ctx);
     std::optional<TcpStateTransition> close(std::errc ec = std::errc{});
     std::expected<void, std::errc> shutdown(ShutdownHow how);
     std::expected<int, std::errc> send_user_data(std::span<uint8_t> user_data);
@@ -210,6 +215,8 @@ protected:
     // thread reads it, so an atomic keeps both sides free of the session lock.
     std::atomic<uint32_t> peer_mss{0};
 
+    std::atomic<uint64_t> remote_mac{0};
+
     std::shared_ptr<std::atomic<bool>> time_wait_cancelled = nullptr;
     std::shared_ptr<std::atomic<bool>> persist_cancelled = nullptr;
     std::shared_ptr<TcpSendWindow> send_window;
@@ -240,7 +247,7 @@ public:
     constexpr bool is_listen_session() const override { return true; }
 
     std::pair<std::shared_ptr<TcpConnectSession>, TcpSocketUser*>
-    process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client);
+    process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx);
 
 private:
     // sessions that already completed the handshake and wait for accept; created_time_point drives lazy expiry
@@ -259,11 +266,11 @@ private:
     uint32_t make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot, std::uint8_t mss_code) const;
     bool verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie, std::uint16_t& peer_mss) const;
     std::uint64_t current_cookie_timeslot() const;
-    void send_syn_ack_without_retransmission(const SocketBuffer& outbound, const SocketAddress& client, std::uint32_t cookie,
+    void send_syn_ack_without_retransmission(const SocketBuffer& outbound, const LayerContext& ctx, std::uint32_t cookie,
                                              std::uint32_t client_isn) const;
 
-    void process_syn(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client);
-    void process_syn_cookie(const TcpSegment& header, const SocketBuffer& payload, const SocketAddress& client) const;
+    void process_syn(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx);
+    void process_syn_cookie(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx) const;
     TCP_LOCK_REQUIRED void collect_expired_accepts(std::vector<std::shared_ptr<TcpConnectSession>>& expired);
     TCP_LOCK_REQUIRED void report_dropped(const SocketAddress& client, std::string_view reason);
 

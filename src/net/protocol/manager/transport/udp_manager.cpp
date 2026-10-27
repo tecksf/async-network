@@ -19,7 +19,7 @@ SocketBuffer UdpManager::allocate_socket_buffer()
     return outbound_pool->allocate_socket_buffer();
 }
 
-co_async<> UdpManager::on_udp_segment_received(const SocketBuffer& inbound, const UdpContext& ctx)
+co_async<> UdpManager::on_udp_segment_received(const SocketBuffer& inbound, const LayerContext& ctx)
 {
     SocketBuffer buffer = inbound;
     const auto input = UdpSegment::build(buffer->get_header_payload());
@@ -29,7 +29,7 @@ co_async<> UdpManager::on_udp_segment_received(const SocketBuffer& inbound, cons
     }
 
     FakeHeader fakeHeader;
-    fakeHeader.set_source_ip(ctx.ip);
+    fakeHeader.set_source_ip(ctx.remote_ip);
     fakeHeader.set_destination_ip(inet->get_host_ip());
     fakeHeader.set_protocol(Protocol::UDP);
     fakeHeader.set_length(buffer->size());
@@ -50,12 +50,12 @@ co_async<> UdpManager::on_udp_segment_received(const SocketBuffer& inbound, cons
     buffer->consume(UdpSegment::HeaderSize);
 
     UdpSocketHandle handle(inet->get_host_ip(), segment.get_destination_port());
-    SocketAddress client(ctx.ip, segment.get_source_port());
+    SocketAddress client(ctx.remote_ip, segment.get_source_port());
 
     handle_udp_data_from_network(handle, client, buffer);
 }
 
-co_async<> UdpManager::async_send_udp_segment(std::vector<SocketBuffer> outbounds, const UdpContext ctx) const
+co_async<> UdpManager::async_send_udp_segment(std::vector<SocketBuffer> outbounds, const LayerContext ctx) const
 {
     size_t size = outbounds.size();
     if (size == 0)
@@ -74,20 +74,19 @@ co_async<> UdpManager::async_send_udp_segment(std::vector<SocketBuffer> outbound
     }
 
     segment.set_length(payload_size);
-    segment.set_destination_port(ctx.destination_port);
-    segment.set_source_port(ctx.source_port);
+    segment.set_destination_port(ctx.remote_port);
+    segment.set_source_port(ctx.local_port);
 
     FakeHeader fake_header;
     fake_header.set_source_ip(inet->get_host_ip());
-    fake_header.set_destination_ip(ctx.ip);
+    fake_header.set_destination_ip(ctx.remote_ip);
     fake_header.set_protocol(Protocol::UDP);
     fake_header.set_length(payload_size);
 
     segment.seal(fake_header, outbounds);
 
-    inet::Ipv4Context context;
+    LayerContext context = ctx;
     context.protocol = Protocol::UDP;
-    context.destination = ctx.ip;
 
     co_await inet->async_send_ipv4_packet(outbounds, context);
 }
@@ -136,10 +135,11 @@ bool UdpManager::handle_user_socket_operation(UdpSocketUser* user)
     else if (user->operation == SocketOperation::Write)
     {
         std::vector<SocketBuffer> outbounds = copy_user_data_to_buffer(user->data);
-        trans::UdpContext context;
-        context.source_port = user->local.port;
-        context.ip = user->address.ip;
-        context.destination_port = user->address.port;
+        LayerContext context;
+        context.protocol = Protocol::UDP;
+        context.local_port = user->local.port;
+        context.remote_ip = user->address.ip;
+        context.remote_port = user->address.port;
 
         app->sumit_task(async_send_udp_segment(outbounds, context));
     }
