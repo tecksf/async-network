@@ -244,7 +244,7 @@ void Polling::handle_one_entry(struct io_uring_cqe* cqe)
     }
     else if (context->type == PollType::Packet)
     {
-        if (auto handle = network_interface->make_task_for_socket_packet(packet_ctx.fd))
+        while (auto handle = network_interface->make_task_for_socket_packet(packet_ctx.fd))
         {
             ready_tasks.push_back(handle);
         }

@@ -1,4 +1,5 @@
 #include "tcp_receive_window.h"
+#include <utility>
 
 namespace coro::net::trans {
 
@@ -88,9 +89,8 @@ size_t TcpReceiveWindow::read_into(std::span<uint8_t> out)
     size_t total = 0;
     while (total < out.size() and not buffer.empty())
     {
-        auto segment = buffer.begin();
-        uint32_t start = segment->sequence_number;
-        if (read_sequence < start)
+        auto head = buffer.begin();
+        if (read_sequence < head->sequence_number)
         {
             break;
         }
@@ -105,30 +105,28 @@ size_t TcpReceiveWindow::read_into(std::span<uint8_t> out)
             limit = std::min(limit, finish_sequence.value() - read_sequence);
         }
 
-        // normal tcp sender sequence numbers never overlap, so this condition should not hold
-        SocketBuffer payload = segment->payload;
-        if (start < read_sequence)
+        auto node = buffer.extract(head);
+        Segment& segment = node.value();
+
+        if (segment.sequence_number < read_sequence)
         {
-            const size_t dropped = payload->consume(read_sequence - start);
-            used_bytes -= dropped;
-            start = read_sequence;
+            segment.payload->consume(read_sequence - segment.sequence_number);
+            segment.sequence_number = read_sequence;
         }
 
-        const uint32_t length = std::min(limit, static_cast<uint32_t>(payload->size()));
-        payload->copy_to(out.subspan(total, length));
-
-        payload->consume(length);
+        const uint32_t length = std::min(limit, static_cast<uint32_t>(segment.payload->size()));
+        segment.payload->copy_to(out.subspan(total, length));
+        segment.payload->consume(length);
+        segment.sequence_number += length;
         used_bytes -= length;
         total += length;
         read_sequence += length;
-        start += length;
 
-        if (payload->size() > 0)
+        if (segment.payload->size() > 0)
         {
+            buffer.insert(std::move(node));
             break;
         }
-
-        buffer.erase(segment);
     }
 
     return total;
@@ -223,7 +221,6 @@ void TcpReceiveWindow::drop_consumed_data()
             break;
         }
 
-        used_bytes -= it->payload->size();
         buffer.erase(it);
     }
 }

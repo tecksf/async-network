@@ -388,7 +388,14 @@ std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
         return task.release_handle();
     }
 
+    const int error = errno;
     recycle(block);
+
+    if (n == 0 or error == EAGAIN or error == EWOULDBLOCK)
+    {
+        return nullptr;
+    }
+
     logger->warn("packet recv error: {}", std::strerror(errno));
     return nullptr;
 }
