@@ -8,7 +8,10 @@
 #include "network_interface.h"
 #include <socket/socket.h>
 #include <common/types.h>
+#include <cstddef>
 #include <memory>
+#include <utility>
+#include <vector>
 #include <common/config.h>
 #include <common/ring_buffe.hpp>
 #include <protocol/capability/physical.h>
@@ -24,7 +27,7 @@ class NetworkController :
     public phy::PhysicalService, public link::LinkService, public inet::InternetService,
     public trans::TransportService, public app::ApplicationService {
 public:
-    NetworkController(std::shared_ptr<spdlog::logger> logger);
+    NetworkController(std::shared_ptr<spdlog::logger> logger, std::size_t workers = 0);
     ~NetworkController() override;
 
     bool apply_config(const NetConfig& config);
@@ -61,8 +64,48 @@ public:
 
 private:
     using Block = uint8_t [MAX_BLOCK_SIZE];
-    std::shared_ptr<RingBuffer<Block>> inbound_buffer;
 
+    struct InboundBuffer {
+        InboundBuffer(std::shared_ptr<RingBuffer<Block>> backing, std::size_t workers, std::size_t depth)
+            : pool(std::move(backing))
+        {
+            if (depth == 0 or workers == 0)
+            {
+                return;
+            }
+
+            caches.reserve(workers);
+            for (std::size_t i = 0; i < workers; ++i)
+            {
+                caches.emplace_back(*pool, depth);
+            }
+        }
+
+        [[nodiscard]] Block* allocate(std::size_t slot) noexcept
+        {
+            return slot < caches.size() ? caches[slot].allocate() : pool->allocate();
+        }
+
+        void deallocate(const Block* block, std::size_t slot) noexcept
+        {
+            if (slot < caches.size())
+            {
+                caches[slot].deallocate(block);
+                return;
+            }
+            pool->deallocate(block);
+        }
+
+        [[nodiscard]] std::size_t cache_depth() const noexcept
+        {
+            return caches.empty() ? 0 : caches.front().cache_depth();
+        }
+
+        std::shared_ptr<RingBuffer<Block>> pool;
+        std::vector<RingBufferCache<Block>> caches;
+    };
+
+    std::shared_ptr<InboundBuffer> inbound_buffer;
     void create_managers();
     void create_inbound_buffer();
 
@@ -72,6 +115,7 @@ private:
     std::string interface_name = "eth0";
 
     std::shared_ptr<spdlog::logger> logger;
+    std::size_t worker_count{1};
 
     IpAddress host_ip;
     MacAddress host_mac;

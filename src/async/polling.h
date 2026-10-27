@@ -4,6 +4,7 @@
 #include <spdlog/spdlog.h>
 #include <liburing.h>
 #include <coroutine>
+#include <cstddef>
 #include <thread>
 #include <deque>
 #include <queue>
@@ -33,7 +34,7 @@ public:
     static constexpr unsigned RingEntries = 1024;
     static Polling* current() noexcept;
 
-    explicit Polling(std::shared_ptr<spdlog::logger> log, uint16_t fanout_id = 0);
+    explicit Polling(std::shared_ptr<spdlog::logger> log, uint16_t fanout_id = 0, std::size_t worker_id = 0);
     ~Polling();
 
     Polling(const Polling&) = delete;
@@ -43,6 +44,7 @@ public:
     struct io_uring* ring() noexcept;
     bool set_network_interface(std::shared_ptr<net::NetworkInterface> interface);
     int packet_fd() const noexcept;
+    std::size_t id() const noexcept;
 
     void run(std::stop_token stoken);
     void stop() const;
@@ -65,6 +67,7 @@ private:
         Timer::Later> timers;
 
     uint16_t fanout_id{0};
+    std::size_t worker_id{0};
     PollContext packet_ctx;
 
     std::shared_ptr<net::NetworkInterface> network_interface;

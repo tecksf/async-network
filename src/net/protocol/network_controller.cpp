@@ -8,11 +8,14 @@
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifndef PACKET_FANOUT_FLAG_IGNORE_OUTGOING
@@ -64,8 +67,38 @@ static bool get_mac_by_ifname(const std::string& ifname, uint8_t mac[6])
     return true;
 }
 
-NetworkController::NetworkController(std::shared_ptr<spdlog::logger> logger)
-    : logger(logger)
+static std::size_t infer_cache_depth(std::size_t slots, std::size_t workers) noexcept
+{
+    constexpr std::size_t PreferredDepth = 2;
+    constexpr std::size_t MaxDepth = 16;
+    constexpr std::size_t BudgetDivisor = 8;
+
+    if (workers == 0)
+    {
+        workers = 1;
+    }
+
+    const std::size_t per_worker = slots / (BudgetDivisor * workers);
+    if (per_worker >= PreferredDepth)
+    {
+        return std::min(per_worker, MaxDepth);
+    }
+    if (per_worker >= 1)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static std::size_t inbound_cache_slot() noexcept
+{
+    const auto* polling = Polling::current();
+    return polling != nullptr ? polling->id() : std::numeric_limits<std::size_t>::max();
+}
+
+NetworkController::NetworkController(std::shared_ptr<spdlog::logger> logger, std::size_t workers)
+    : logger(logger),
+      worker_count(workers)
 {
     config.normalize();
 }
@@ -76,7 +109,21 @@ NetworkController::~NetworkController()
 
 void NetworkController::create_inbound_buffer()
 {
-    inbound_buffer = std::make_shared<RingBuffer<Block>>(static_cast<std::size_t>(config.receive_slots));
+    const auto slots = static_cast<std::size_t>(config.receive_slots);
+    const std::size_t depth = infer_cache_depth(slots, worker_count);
+
+    inbound_buffer = std::make_shared<InboundBuffer>(std::make_shared<RingBuffer<Block>>(slots), worker_count, depth);
+    if (depth == 0)
+    {
+        logger->info("[Network] inbound frame pool: slots={}, workers={}, per worker cache disabled "
+                     "(raise receive_slots to >= {} for depth 2)",
+                     slots, worker_count, 8 * worker_count * 2);
+    }
+    else
+    {
+        logger->info("[Network] inbound frame pool: slots={}, workers={}, cache depth={}, borrowed={}",
+                     slots, worker_count, depth, depth * worker_count);
+    }
 }
 
 void NetworkController::create_managers()
@@ -300,14 +347,15 @@ bool NetworkController::register_tcp_connect_operation(TcpSocketUser* user, cons
 
 std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
 {
-    Block* block = inbound_buffer->allocate();
+    const std::size_t cache_slot = inbound_cache_slot();
+    Block* block = inbound_buffer->allocate(cache_slot);
     if (block == nullptr)
     {
         return nullptr;
     }
 
-    auto recycle = [pool = inbound_buffer](const void* ptr) {
-        pool->deallocate(static_cast<const Block*>(ptr));
+    auto recycle = [frames = inbound_buffer](const void* ptr) {
+        frames->deallocate(static_cast<const Block*>(ptr), inbound_cache_slot());
     };
 
     ++message_count;

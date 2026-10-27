@@ -4,11 +4,30 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <cstring>
 #include <limits>
+#include <memory>
 #include <new>
 #include <type_traits>
 
 namespace coro::net {
+
+inline void pause_backoff(unsigned& spins) noexcept
+{
+#if defined(__x86_64__) || defined(__i386__)
+    const unsigned limit = spins < 64 ? spins : 64;
+    for (unsigned i = 0; i < limit; ++i)
+    {
+        __builtin_ia32_pause();
+    }
+#else
+    (void) spins;
+#endif
+    if (spins < 64)
+    {
+        ++spins;
+    }
+}
 
 template<typename T>
 class RingBuffer {
@@ -86,6 +105,7 @@ public:
     [[nodiscard]] T* allocate() noexcept
     {
         Packed snapshot = head.load(std::memory_order_acquire);
+        unsigned spins = 0;
         while (true)
         {
             const Index node = unpack_index(snapshot);
@@ -102,6 +122,8 @@ public:
             {
                 return slot_at(node);
             }
+
+            pause_backoff(spins);
         }
     }
 
@@ -112,15 +134,15 @@ public:
             return;
         }
 
-        const auto offset = static_cast<std::size_t>(reinterpret_cast<const std::byte*>(ptr) - storage);
-        if (offset % sizeof(T) != 0 or offset >= slot_count * sizeof(T))
+        const Index index = index_of(ptr);
+        if (index == NilIndex)
         {
             assert(false && "pointer does not belong to this pool");
             return;
         }
 
-        const auto index = static_cast<Index>(offset / sizeof(T));
         Packed snapshot = head.load(std::memory_order_relaxed);
+        unsigned spins = 0;
         while (true)
         {
             next_slot(index) = unpack_index(snapshot);
@@ -131,6 +153,90 @@ public:
             {
                 return;
             }
+            pause_backoff(spins);
+        }
+    }
+
+    std::size_t allocate_batch(T** out, std::size_t count) noexcept
+    {
+        if (out == nullptr or count == 0)
+        {
+            return 0;
+        }
+
+        Packed snapshot = head.load(std::memory_order_acquire);
+        unsigned spins = 0;
+        while (true)
+        {
+            Index node = unpack_index(snapshot);
+            if (node == NilIndex)
+            {
+                return 0;
+            }
+
+            std::size_t taken = 0;
+            Index tail = node;
+            while (taken < count and tail != NilIndex)
+            {
+                out[taken++] = slot_at(tail);
+                tail = next_slot(tail);
+            }
+
+            const Packed desired = pack(tail, unpack_tag(snapshot) + 1);
+            if (head.compare_exchange_strong(snapshot, desired,
+                                             std::memory_order_acquire,
+                                             std::memory_order_relaxed))
+            {
+                return taken;
+            }
+            pause_backoff(spins);
+        }
+    }
+
+    void deallocate_batch(T* const* items, std::size_t count) noexcept
+    {
+        if (items == nullptr or count == 0 or storage == nullptr)
+        {
+            return;
+        }
+
+        Index head_index = NilIndex;
+        Index tail_index = NilIndex;
+        for (std::size_t i = count; i-- > 0;)
+        {
+            const Index index = index_of(items[i]);
+            if (index == NilIndex)
+            {
+                assert(false && "pointer does not belong to this pool");
+                continue;
+            }
+
+            next_slot(index) = head_index;
+            head_index = index;
+            if (tail_index == NilIndex)
+            {
+                tail_index = index;
+            }
+        }
+
+        if (head_index == NilIndex)
+        {
+            return;
+        }
+
+        Packed snapshot = head.load(std::memory_order_relaxed);
+        unsigned spins = 0;
+        while (true)
+        {
+            next_slot(tail_index) = unpack_index(snapshot);
+            const Packed desired = pack(head_index, unpack_tag(snapshot) + 1);
+            if (head.compare_exchange_weak(snapshot, desired,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed))
+            {
+                return;
+            }
+            pause_backoff(spins);
         }
     }
 
@@ -150,6 +256,21 @@ public:
     }
 
 private:
+    Index index_of(const T* ptr) const noexcept
+    {
+        if (ptr == nullptr or storage == nullptr)
+        {
+            return NilIndex;
+        }
+
+        const auto offset = static_cast<std::size_t>(reinterpret_cast<const std::byte*>(ptr) - storage);
+        if (offset % sizeof(T) != 0 or offset >= slot_count * sizeof(T))
+        {
+            return NilIndex;
+        }
+        return static_cast<Index>(offset / sizeof(T));
+    }
+
     Index& next_slot(Index index) noexcept
     {
         return *reinterpret_cast<Index*>(storage + static_cast<std::size_t>(index) * sizeof(T));
@@ -163,6 +284,114 @@ private:
     std::size_t slot_count;
     std::byte* storage;
     alignas(64) std::atomic<Packed> head;
+};
+
+template<typename T>
+class RingBufferCache {
+public:
+    RingBufferCache() noexcept = default;
+
+    RingBufferCache(RingBuffer<T>& backing, std::size_t depth)
+        : pool(&backing),
+          ready(std::make_unique<T*[]>(depth)),
+          retired(std::make_unique<T*[]>(depth)),
+          depth(depth)
+    {
+    }
+
+    RingBufferCache(RingBufferCache&&) noexcept = default;
+    RingBufferCache& operator=(RingBufferCache&&) noexcept = default;
+    RingBufferCache(const RingBufferCache&) = delete;
+    RingBufferCache& operator=(const RingBufferCache&) = delete;
+
+    std::size_t cache_depth() const noexcept
+    {
+        return depth;
+    }
+
+    T* allocate() noexcept
+    {
+        if (pool == nullptr)
+        {
+            return nullptr;
+        }
+
+        if (depth == 0 or not ready)
+        {
+            return pool->allocate();
+        }
+
+        if (ready_count == 0)
+        {
+            refill();
+        }
+        return ready_count > 0 ? ready[--ready_count] : nullptr;
+    }
+
+    void deallocate(const T* block) noexcept
+    {
+        if (block == nullptr or pool == nullptr)
+        {
+            return;
+        }
+
+        if (depth == 0 or not retired)
+        {
+            pool->deallocate(block);
+            return;
+        }
+
+        if (retired_count == depth)
+        {
+            flush_retired();
+        }
+        retired[retired_count++] = const_cast<T*>(block);
+    }
+
+    void flush() noexcept
+    {
+        flush_retired();
+        if (ready_count > 0 and pool != nullptr)
+        {
+            pool->deallocate_batch(ready.get(), ready_count);
+            ready_count = 0;
+        }
+    }
+
+private:
+    void refill() noexcept
+    {
+        if (pool == nullptr or depth == 0)
+        {
+            return;
+        }
+
+        if (retired_count > 0)
+        {
+            std::memcpy(ready.get(), retired.get(), retired_count * sizeof(T*));
+            ready_count = retired_count;
+            retired_count = 0;
+            return;
+        }
+
+        ready_count = pool->allocate_batch(ready.get(), depth);
+    }
+
+    void flush_retired() noexcept
+    {
+        if (retired_count > 0 and pool != nullptr and retired)
+        {
+            pool->deallocate_batch(retired.get(), retired_count);
+        }
+        retired_count = 0;
+    }
+
+    RingBuffer<T>* pool{nullptr};
+    std::unique_ptr<T*[]> ready;
+    std::unique_ptr<T*[]> retired;
+    std::size_t depth{0};
+    std::size_t ready_count{0};
+    std::size_t retired_count{0};
 };
 
 }

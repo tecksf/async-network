@@ -13,9 +13,10 @@ Polling* Polling::current() noexcept
     return LocalPolling;
 }
 
-Polling::Polling(std::shared_ptr<spdlog::logger> log, uint16_t fanout)
+Polling::Polling(std::shared_ptr<spdlog::logger> log, uint16_t fanout, std::size_t worker)
     : logger(log),
-      fanout_id(fanout)
+      fanout_id(fanout),
+      worker_id(worker)
 {
     init();
 }
@@ -50,6 +51,11 @@ bool Polling::set_network_interface(std::shared_ptr<net::NetworkInterface> inter
 int Polling::packet_fd() const noexcept
 {
     return packet_ctx.fd;
+}
+
+std::size_t Polling::id() const noexcept
+{
+    return worker_id;
 }
 
 void Polling::init()
