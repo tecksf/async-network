@@ -224,7 +224,7 @@ SocketBuffer Ipv4Manager::assemble_ipv4_fragment(const Ipv4Packet& packet, const
 
     SocketBuffer fragment = inbound;
     fragment->set_sequence(packet.get_fragment_offset());
-    fragment_entry.bulk_inbound->add(fragment);
+    fragment_entry.bulk_inbound.add(fragment);
     if (packet.is_last_fragment())
     {
         fragment_entry.total_payload_length = finish;
@@ -243,9 +243,9 @@ SocketBuffer Ipv4Manager::assemble_ipv4_fragment(const Ipv4Packet& packet, const
 
         if (fragment_entry.total_payload_length == data_offset)
         {
-            auto result = fragment_entry.bulk_inbound;
+            SocketBuffer result(std::move(fragment_entry.bulk_inbound));
             fragment_table.erase(it);
-            return SocketBuffer(result);
+            return result;
         }
     }
 

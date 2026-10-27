@@ -2,7 +2,7 @@
 #define ASYNC_NETWORK_SOCKET_BUFFER_H
 
 #include <cstddef>
-#include <deque>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <memory>
@@ -10,6 +10,7 @@
 #include <span>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace coro::net {
@@ -114,7 +115,6 @@ public:
     virtual std::span<uint8_t> get_header_payload() const = 0;
     virtual std::span<uint8_t> allocate(std::size_t size) = 0;
     virtual void reclaim() = 0;
-    virtual std::shared_ptr<SocketBufferInterface> clone() const = 0;
 
     virtual size_t size() const;
     virtual int get_sequence() const;
@@ -135,15 +135,84 @@ protected:
     int sequence = 0;
 };
 
+class SocketBufferStorage {
+public:
+    SocketBufferStorage(uint8_t* ptr, size_t capacity, std::function<void(const void*)> recycle);
+    ~SocketBufferStorage();
+
+    SocketBufferStorage(const SocketBufferStorage&) = delete;
+    SocketBufferStorage& operator=(const SocketBufferStorage&) = delete;
+
+    uint8_t* ptr;
+    const size_t capacity;
+    std::function<void(const void*)> recycle;
+};
+
+class SocketBuffer;
+
+class SocketBufferImpl : public SocketBufferInterface {
+public:
+    SocketBufferImpl(uint8_t* ptr, size_t capacity, std::optional<size_t> len,
+                     std::function<void(const void*)> recycle = nullptr);
+    SocketBufferImpl(std::shared_ptr<SocketBufferStorage> storage, std::span<uint8_t> payload);
+
+    SocketBufferImpl(const SocketBufferImpl&) = default;
+    SocketBufferImpl(SocketBufferImpl&&) noexcept = default;
+    SocketBufferImpl& operator=(const SocketBufferImpl&) = default;
+    SocketBufferImpl& operator=(SocketBufferImpl&&) noexcept = default;
+    ~SocketBufferImpl() override = default;
+
+    size_t size() const override;
+    std::span<uint8_t> allocate(std::size_t size) override;
+    size_t consume(size_t n, Dir dir = Dir::Backward) override;
+    std::span<uint8_t> get_header_payload() const override;
+    void reclaim() override;
+
+    std::vector<std::span<uint8_t>> get_spans() override;
+    std::vector<std::span<const uint8_t>> get_spans() const override;
+
+private:
+    std::shared_ptr<SocketBufferStorage> storage;
+    std::span<uint8_t> payload;
+};
+
+class BulkSocketBufferImpl : public SocketBufferInterface {
+public:
+    BulkSocketBufferImpl() = default;
+    BulkSocketBufferImpl(const BulkSocketBufferImpl& other);
+    BulkSocketBufferImpl(BulkSocketBufferImpl&& other) noexcept;
+    BulkSocketBufferImpl& operator=(const BulkSocketBufferImpl& other);
+    BulkSocketBufferImpl& operator=(BulkSocketBufferImpl&& other) noexcept;
+    ~BulkSocketBufferImpl() override;
+
+    void add(const SocketBuffer& buf);
+
+    size_t size() const override;
+    size_t consume(size_t n, Dir dir = Dir::Backward) override;
+    std::span<uint8_t> get_header_payload() const override;
+    std::span<uint8_t> allocate(std::size_t size) override;
+    void reclaim() override;
+
+    std::vector<std::span<uint8_t>> get_spans() override;
+    std::vector<std::span<const uint8_t>> get_spans() const override;
+
+private:
+    std::vector<SocketBuffer> buffer;
+};
+
 class SocketBuffer {
 public:
-    SocketBuffer();
-    SocketBuffer(std::nullptr_t);
-    explicit SocketBuffer(std::shared_ptr<SocketBufferInterface> impl);
+    using Impl = std::variant<std::monostate, SocketBufferImpl, BulkSocketBufferImpl>;
+
+    SocketBuffer() noexcept;
+    SocketBuffer(std::nullptr_t) noexcept;
+    explicit SocketBuffer(SocketBufferImpl impl);
+    explicit SocketBuffer(BulkSocketBufferImpl impl);
     SocketBuffer(const SocketBuffer& other);
-    SocketBuffer(SocketBuffer&& other) noexcept = default;
+    SocketBuffer(SocketBuffer&& other) noexcept;
     SocketBuffer& operator=(const SocketBuffer& other);
-    SocketBuffer& operator=(SocketBuffer&& other) noexcept = default;
+    SocketBuffer& operator=(SocketBuffer&& other) noexcept;
+    ~SocketBuffer();
 
     static SocketBuffer reuse_for_outbound(const SocketBuffer& inbound);
     static SocketBuffer make_outbound_view(uint8_t* ptr, size_t capacity);
@@ -155,60 +224,8 @@ public:
     explicit operator bool() const;
     void reset();
 
-    class Storage {
-    public:
-        Storage(uint8_t* ptr, size_t capacity, std::function<void(const void*)> recycle);
-        ~Storage();
-
-        Storage(const Storage&) = delete;
-        Storage& operator=(const Storage&) = delete;
-
-        uint8_t* ptr;
-        const size_t capacity;
-        std::function<void(const void*)> recycle;
-    };
-
 private:
-    std::shared_ptr<SocketBufferInterface> impl = nullptr;
-};
-
-class SocketBufferImpl : public SocketBufferInterface {
-public:
-    SocketBufferImpl(uint8_t* ptr, size_t capacity, std::optional<size_t> len,
-                     const std::function<void(const void*)>& recycle = nullptr);
-    SocketBufferImpl(std::shared_ptr<SocketBuffer::Storage> storage, std::span<uint8_t> payload);
-
-    std::shared_ptr<SocketBufferInterface> clone() const override;
-    size_t size() const override;
-    std::span<uint8_t> allocate(std::size_t size) override;
-    size_t consume(size_t n, Dir dir = Dir::Backward) override;
-    std::span<uint8_t> get_header_payload() const override;
-    void reclaim() override;
-
-    std::vector<std::span<uint8_t>> get_spans() override;
-    std::vector<std::span<const uint8_t>> get_spans() const override;
-
-private:
-    std::shared_ptr<SocketBuffer::Storage> storage;
-    std::span<uint8_t> payload;
-};
-
-class BulkSocketBufferImpl : public SocketBufferInterface {
-public:
-    void add(const SocketBuffer& buf);
-
-    std::shared_ptr<SocketBufferInterface> clone() const override;
-    size_t size() const override;
-    size_t consume(size_t n, Dir dir = Dir::Backward) override;
-    std::span<uint8_t> get_header_payload() const override;
-    std::span<uint8_t> allocate(std::size_t size) override;
-    void reclaim() override;
-
-    std::vector<std::span<uint8_t>> get_spans() override;
-    std::vector<std::span<const uint8_t>> get_spans() const override;
-
-private:
-    std::deque<SocketBuffer> buffer;
+    Impl impl = std::monostate{};
 };
 
 }

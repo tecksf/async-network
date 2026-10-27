@@ -382,7 +382,7 @@ std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
         // }
 
         SocketBuffer inbound(
-            std::make_shared<SocketBufferImpl>(reinterpret_cast<uint8_t*>(block), config.block_size, n, recycle)
+            SocketBufferImpl(reinterpret_cast<uint8_t*>(block), config.block_size, n, recycle)
         );
         auto task = on_ethernet_frame_received(inbound);
         return task.release_handle();

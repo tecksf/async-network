@@ -30,13 +30,10 @@ struct FragmentKey {
 
 struct FragmentEntry {
     std::map<uint32_t, uint32_t> received_ranges;
-    std::shared_ptr<BulkSocketBufferImpl> bulk_inbound;
+    BulkSocketBufferImpl bulk_inbound;
     std::optional<uint32_t> total_payload_length;
 
-    FragmentEntry()
-        : bulk_inbound(std::make_shared<BulkSocketBufferImpl>())
-    {
-    }
+    FragmentEntry() = default;
 
     FragmentEntry(const FragmentEntry&) = delete;
     FragmentEntry& operator=(const FragmentEntry&) = delete;

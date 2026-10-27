@@ -35,7 +35,7 @@ std::vector<uint8_t> sequential_bytes(size_t size, size_t start = 0)
 
 SocketBuffer make_socket_buffer(uint8_t* data, size_t size, int sequence)
 {
-    SocketBuffer buffer(std::make_shared<SocketBufferImpl>(data, size, size));
+    SocketBuffer buffer(SocketBufferImpl(data, size, size));
     buffer->set_sequence(sequence);
     return buffer;
 }
@@ -49,7 +49,7 @@ protected:
         EXPECT_FALSE(sut);
 
         auto recycle = [this](const void*) { called = true; };
-        sut = SocketBuffer(std::make_shared<SocketBufferImpl>(data, Size, Size, recycle));
+        sut = SocketBuffer(SocketBufferImpl(data, Size, Size, recycle));
     }
 
     void TearDown() override
@@ -323,7 +323,7 @@ TEST(SocketBufferImplStandaloneTest, ConstructWithWholeStorageKeepsPayload)
     int recycle_count = 0;
     const void* recycled = nullptr;
 
-    auto buffer = SocketBuffer(std::make_shared<SocketBufferImpl>(data, 16, 16, [&](const void* ptr) {
+    auto buffer = SocketBuffer(SocketBufferImpl(data, 16, 16, [&](const void* ptr) {
         ++recycle_count;
         recycled = ptr;
     }));
@@ -343,7 +343,7 @@ TEST(SocketBufferImplStandaloneTest, ConstructWithoutLengthStartsEmptyAtTail)
 {
     uint8_t data[16] = {};
 
-    auto buffer = SocketBuffer(std::make_shared<SocketBufferImpl>(data, 16, std::nullopt));
+    auto buffer = SocketBuffer(SocketBufferImpl(data, 16, std::nullopt));
 
     EXPECT_EQ(buffer->size(), 0);
     EXPECT_EQ(buffer->cbegin(), buffer->cend());
@@ -372,7 +372,7 @@ TEST(SocketBufferImplStandaloneTest, PartialLengthAllocatesAfterFullConsume)
         data[i] = static_cast<uint8_t>(i);
     }
 
-    auto buffer = SocketBuffer(std::make_shared<SocketBufferImpl>(data, 16, 10));
+    auto buffer = SocketBuffer(SocketBufferImpl(data, 16, 10));
 
     EXPECT_EQ(buffer->size(), 10);
     EXPECT_EQ(buffer->get_header_payload().data(), data);
@@ -394,15 +394,15 @@ TEST(SocketBufferImplStandaloneTest, CloneSharesStorageButKeepsOwnPayload)
 {
     uint8_t data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     int recycle_count = 0; {
-        auto buffer = SocketBuffer(std::make_shared<SocketBufferImpl>(data, 8, 8, [&](const void*) {
+        auto buffer = SocketBuffer(SocketBufferImpl(data, 8, 8, [&](const void*) {
             ++recycle_count;
         }));
         buffer->set_sequence(3);
 
-        auto clone = buffer->clone();
+        auto clone = buffer.clone();
 
         ASSERT_TRUE(clone);
-        EXPECT_NE(clone.get(), buffer.operator->());
+        EXPECT_NE(clone.operator->(), buffer.operator->());
         EXPECT_EQ(clone->get_sequence(), 3);
         EXPECT_EQ(clone->size(), 8u);
         EXPECT_EQ(clone->get_header_payload().data(), data);
@@ -424,7 +424,7 @@ TEST(SocketBufferImplStandaloneTest, RecycleRunsOnceForSharedStorage)
 {
     uint8_t data[8] = {};
     int recycle_count = 0; {
-        auto buffer = SocketBuffer(std::make_shared<SocketBufferImpl>(data, 8, 8, [&](const void*) {
+        auto buffer = SocketBuffer(SocketBufferImpl(data, 8, 8, [&](const void*) {
             ++recycle_count;
         }));
 
@@ -583,18 +583,19 @@ TEST(BulkSocketBufferImplTest, CloneCopiesChildrenAndSequence)
     bulk.add(make_socket_buffer(back, 4, 2));
     bulk.set_sequence(9);
 
-    auto clone = bulk.clone();
+    SocketBuffer original(std::move(bulk));
+    SocketBuffer clone = original.clone();
 
     ASSERT_TRUE(clone);
-    EXPECT_NE(clone.get(), static_cast<SocketBufferInterface*>(&bulk));
+    EXPECT_NE(clone.operator->(), original.operator->());
     EXPECT_EQ(clone->get_sequence(), 9);
     EXPECT_EQ(clone->size(), 8u);
-    EXPECT_EQ(buffer_bytes(*clone), buffer_bytes(bulk));
+    EXPECT_EQ(buffer_bytes(*clone), buffer_bytes(*original));
 
     clone->consume(4, Dir::Backward);
 
     EXPECT_EQ(clone->size(), 4u);
-    EXPECT_EQ(bulk.size(), 8u);
+    EXPECT_EQ(original->size(), 8u);
 }
 
 TEST(BulkSocketBufferImplTest, WrapperDelegatesToBulk)
@@ -604,11 +605,11 @@ TEST(BulkSocketBufferImplTest, WrapperDelegatesToBulk)
     std::fill_n(front, 4, 0x11);
     std::fill_n(back, 4, 0x22);
 
-    auto bulk = std::make_shared<BulkSocketBufferImpl>();
-    bulk->add(make_socket_buffer(front, 4, 1));
-    bulk->add(make_socket_buffer(back, 4, 2));
+    BulkSocketBufferImpl bulk;
+    bulk.add(make_socket_buffer(front, 4, 1));
+    bulk.add(make_socket_buffer(back, 4, 2));
 
-    SocketBuffer wrapped(bulk);
+    SocketBuffer wrapped(std::move(bulk));
 
     ASSERT_TRUE(wrapped);
     EXPECT_EQ(wrapped->size(), 8u);
@@ -719,7 +720,7 @@ TEST(SocketBufferIteratorTest, ConstIteratorIsReadOnly)
 TEST(SocketBufferCopyToTest, CopiesPayloadUpToSpanSize)
 {
     uint8_t data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-    auto buffer = SocketBuffer(std::make_shared<SocketBufferImpl>(data, 8, 8));
+    auto buffer = SocketBuffer(SocketBufferImpl(data, 8, 8));
 
     uint8_t dst[8] = {};
     EXPECT_EQ(buffer->copy_to(std::span<uint8_t>(dst)), 8u);

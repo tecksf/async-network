@@ -7,7 +7,7 @@ namespace coro::net {
 namespace {
 
 template<typename Span>
-std::vector<Span> collect_spans(const std::deque<SocketBuffer>& buffers)
+std::vector<Span> collect_spans(const std::vector<SocketBuffer>& buffers)
 {
     std::vector<Span> spans;
     spans.reserve(buffers.size());
@@ -87,94 +87,22 @@ size_t SocketBufferInterface::copy_to(std::span<uint8_t> dst) const
     return copied;
 }
 
-SocketBuffer::SocketBuffer()
-{
-}
-
-SocketBuffer::SocketBuffer(std::nullptr_t)
-{
-}
-
-SocketBuffer::SocketBuffer(std::shared_ptr<SocketBufferInterface> impl)
-    : impl(std::move(impl))
-{
-}
-
-SocketBuffer::SocketBuffer(const SocketBuffer& other)
-    : impl(other.impl ? other.impl->clone() : nullptr)
-{
-}
-
-SocketBuffer& SocketBuffer::operator=(const SocketBuffer& other)
-{
-    impl = other.impl ? other.impl->clone() : nullptr;
-    return *this;
-}
-
-SocketBuffer SocketBuffer::reuse_for_outbound(const SocketBuffer& inbound)
-{
-    auto outbound = inbound;
-    outbound->reclaim();
-    return outbound;
-}
-
-SocketBuffer SocketBuffer::make_outbound_view(uint8_t* ptr, size_t capacity)
-{
-    auto outbound = SocketBuffer(std::make_shared<SocketBufferImpl>(ptr, capacity, std::nullopt));
-    return outbound;
-}
-
-SocketBuffer SocketBuffer::clone() const
-{
-    return impl ? SocketBuffer(impl->clone()) : SocketBuffer{};
-}
-
-SocketBufferInterface* SocketBuffer::operator->()
-{
-    return impl.get();
-}
-
-SocketBufferInterface& SocketBuffer::operator*()
-{
-    return *impl;
-}
-
-const SocketBufferInterface* SocketBuffer::operator->() const
-{
-    return impl.get();
-}
-
-const SocketBufferInterface& SocketBuffer::operator*() const
-{
-    return *impl;
-}
-
-SocketBuffer::operator bool() const
-{
-    return impl != nullptr;
-}
-
-void SocketBuffer::reset()
-{
-    impl.reset();
-}
-
-SocketBuffer::Storage::Storage(uint8_t* ptr, size_t capacity, std::function<void(const void*)> recycle)
+SocketBufferStorage::SocketBufferStorage(uint8_t* ptr, size_t capacity, std::function<void(const void*)> recycle)
     : ptr(ptr),
       capacity(capacity),
       recycle(std::move(recycle))
 {
 }
 
-SocketBuffer::Storage::~Storage()
+SocketBufferStorage::~SocketBufferStorage()
 {
     if (recycle)
         recycle(ptr);
 }
 
 SocketBufferImpl::SocketBufferImpl(uint8_t* ptr, size_t capacity, std::optional<size_t> len,
-                                   const std::function<void(const void*)>& recycle)
-    : storage(std::make_shared<SocketBuffer::Storage>(ptr, capacity, recycle))
+                                   std::function<void(const void*)> recycle)
+    : storage(std::make_shared<SocketBufferStorage>(ptr, capacity, std::move(recycle)))
 {
     if (len.has_value())
     {
@@ -186,17 +114,10 @@ SocketBufferImpl::SocketBufferImpl(uint8_t* ptr, size_t capacity, std::optional<
     }
 }
 
-SocketBufferImpl::SocketBufferImpl(std::shared_ptr<SocketBuffer::Storage> storage, std::span<uint8_t> payload)
+SocketBufferImpl::SocketBufferImpl(std::shared_ptr<SocketBufferStorage> storage, std::span<uint8_t> payload)
     : storage(std::move(storage)),
       payload(payload)
 {
-}
-
-std::shared_ptr<SocketBufferInterface> SocketBufferImpl::clone() const
-{
-    auto view = std::make_shared<SocketBufferImpl>(storage, payload);
-    view->set_sequence(get_sequence());
-    return view;
 }
 
 size_t SocketBufferImpl::size() const
@@ -251,23 +172,22 @@ std::vector<std::span<const uint8_t>> SocketBufferImpl::get_spans() const
     return {payload};
 }
 
+BulkSocketBufferImpl::BulkSocketBufferImpl(const BulkSocketBufferImpl& other) = default;
+
+BulkSocketBufferImpl::BulkSocketBufferImpl(BulkSocketBufferImpl&& other) noexcept = default;
+
+BulkSocketBufferImpl& BulkSocketBufferImpl::operator=(const BulkSocketBufferImpl& other) = default;
+
+BulkSocketBufferImpl& BulkSocketBufferImpl::operator=(BulkSocketBufferImpl&& other) noexcept = default;
+
+BulkSocketBufferImpl::~BulkSocketBufferImpl() = default;
+
 void BulkSocketBufferImpl::add(const SocketBuffer& buf)
 {
     buffer.push_back(buf);
     std::ranges::sort(buffer, [](const SocketBuffer& lhs, const SocketBuffer& rhs) {
         return lhs->get_sequence() < rhs->get_sequence();
     });
-}
-
-std::shared_ptr<SocketBufferInterface> BulkSocketBufferImpl::clone() const
-{
-    auto view = std::make_shared<BulkSocketBufferImpl>();
-    view->set_sequence(get_sequence());
-    for (const auto& child: buffer)
-    {
-        view->buffer.push_back(child.clone());
-    }
-    return view;
 }
 
 size_t BulkSocketBufferImpl::size() const
@@ -329,6 +249,114 @@ std::vector<std::span<uint8_t>> BulkSocketBufferImpl::get_spans()
 std::vector<std::span<const uint8_t>> BulkSocketBufferImpl::get_spans() const
 {
     return collect_spans<std::span<const uint8_t>>(buffer);
+}
+
+SocketBuffer::SocketBuffer() noexcept = default;
+
+SocketBuffer::SocketBuffer(std::nullptr_t) noexcept
+{
+}
+
+SocketBuffer::SocketBuffer(SocketBufferImpl impl)
+    : impl(std::move(impl))
+{
+}
+
+SocketBuffer::SocketBuffer(BulkSocketBufferImpl impl)
+    : impl(std::move(impl))
+{
+}
+
+SocketBuffer::SocketBuffer(const SocketBuffer& other) = default;
+
+SocketBuffer::SocketBuffer(SocketBuffer&& other) noexcept
+    : impl(std::move(other.impl))
+{
+    other.reset();
+}
+
+SocketBuffer& SocketBuffer::operator=(const SocketBuffer& other) = default;
+
+SocketBuffer& SocketBuffer::operator=(SocketBuffer&& other) noexcept
+{
+    if (this != &other)
+    {
+        impl = std::move(other.impl);
+        other.reset();
+    }
+    return *this;
+}
+
+SocketBuffer::~SocketBuffer() = default;
+
+SocketBuffer SocketBuffer::reuse_for_outbound(const SocketBuffer& inbound)
+{
+    SocketBuffer outbound = inbound;
+    if (outbound)
+    {
+        outbound->reclaim();
+    }
+    return outbound;
+}
+
+SocketBuffer SocketBuffer::make_outbound_view(uint8_t* ptr, size_t capacity)
+{
+    return SocketBuffer(SocketBufferImpl(ptr, capacity, std::nullopt));
+}
+
+SocketBuffer SocketBuffer::clone() const
+{
+    return *this;
+}
+
+SocketBufferInterface* SocketBuffer::operator->()
+{
+    if (auto* single = std::get_if<SocketBufferImpl>(&impl))
+    {
+        return single;
+    }
+
+    if (auto* bulk = std::get_if<BulkSocketBufferImpl>(&impl))
+    {
+        return bulk;
+    }
+
+    return nullptr;
+}
+
+SocketBufferInterface& SocketBuffer::operator*()
+{
+    return *operator->();
+}
+
+const SocketBufferInterface* SocketBuffer::operator->() const
+{
+    if (const auto* single = std::get_if<SocketBufferImpl>(&impl))
+    {
+        return single;
+    }
+
+    if (const auto* bulk = std::get_if<BulkSocketBufferImpl>(&impl))
+    {
+        return bulk;
+    }
+
+    return nullptr;
+}
+
+const SocketBufferInterface& SocketBuffer::operator*() const
+{
+    return *operator->();
+}
+
+SocketBuffer::operator bool() const
+{
+    return not std::holds_alternative<std::monostate>(impl);
+}
+
+void SocketBuffer::reset()
+{
+    impl.emplace<std::monostate>();
 }
 
 }

@@ -50,7 +50,7 @@ inline SocketBuffer BufferPool::allocate_socket_buffer()
     if (Block* block = pool.allocate(); block != nullptr)
     {
         std::shared_ptr<BufferPool> self = shared_from_this();
-        return SocketBuffer(std::make_shared<SocketBufferImpl>(
+        return SocketBuffer(SocketBufferImpl(
             reinterpret_cast<uint8_t*>(block), sizeof(Block), std::nullopt,
             [self = std::move(self)](const void* ptr) { self->pool.deallocate(static_cast<const Block*>(ptr)); }
         ));
@@ -62,7 +62,7 @@ inline SocketBuffer BufferPool::allocate_socket_buffer()
         return SocketBuffer{};
     }
 
-    return SocketBuffer(std::make_shared<SocketBufferImpl>(
+    return SocketBuffer(SocketBufferImpl(
         reinterpret_cast<uint8_t*>(heap), sizeof(Block), std::nullopt,
         [](const void* ptr) { delete[] static_cast<const Block*>(ptr); }
     ));
