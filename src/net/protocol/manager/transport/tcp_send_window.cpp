@@ -67,7 +67,8 @@ void TcpSendWindow::push_outbound(const TcpSegment& segment, const SocketBuffer&
 
     if (seq_len == 0)
     {
-        push_outbound_into_tx_queue(outbound);
+        app->submit_local_task(trans->async_send_tcp_segment(outbound, make_context()));
+        // push_outbound_into_tx_queue(outbound);
         return;
     }
 
@@ -110,7 +111,7 @@ void TcpSendWindow::push_outbound_into_tx_queue(const SocketBuffer& outbound, co
         return;
     }
 
-    app->sumit_task(background_tx_queue_transmit_worker(shared_from_this()));
+    app->submit_task(background_tx_queue_transmit_worker(shared_from_this()));
 }
 
 co_async<> TcpSendWindow::background_tx_queue_transmit_worker(const std::shared_ptr<TcpSendWindow> window)
@@ -140,7 +141,7 @@ co_async<> TcpSendWindow::background_tx_queue_transmit_worker(const std::shared_
 
         if (item.owner)
         {
-            window->app->sumit_task(window->retransmit_segment(item.owner));
+            window->app->submit_task(window->retransmit_segment(item.owner));
         }
     }
 }

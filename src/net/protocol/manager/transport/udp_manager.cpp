@@ -141,7 +141,7 @@ bool UdpManager::handle_user_socket_operation(UdpSocketUser* user)
         context.remote_ip = user->address.ip;
         context.remote_port = user->address.port;
 
-        app->sumit_task(async_send_udp_segment(outbounds, context));
+        app->submit_task(async_send_udp_segment(outbounds, context));
     }
     else if (user->operation == SocketOperation::Close)
     {

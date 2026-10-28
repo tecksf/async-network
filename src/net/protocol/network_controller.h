@@ -48,7 +48,8 @@ public:
     void update_address_mapping(const IpAddress& ip, const MacAddress& mac) override;
     bool subscribe_mac_updating_event(Context* ctx) override;
     int allocate_fd() override;
-    void sumit_task(std::coroutine_handle<> h) override;
+    void submit_task(std::coroutine_handle<> h) override;
+    void submit_local_task(std::coroutine_handle<> h) override;
     link::RetrieveMacAwaiter retrieve_mac_address(const IpAddress& ip) override;
     co_async<> on_ethernet_frame_received(SocketBuffer inbound) const override;
     co_async<> on_arp_packet_received(const SocketBuffer& inbound, const LayerContext& ctx) const override;

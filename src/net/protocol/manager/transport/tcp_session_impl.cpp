@@ -298,7 +298,7 @@ void TcpListenSession::send_syn_ack_without_retransmission(const SocketBuffer& o
 
     LayerContext context = ctx;
     context.protocol = Protocol::TCP;
-    app->sumit_task(trans->async_send_tcp_segment(frame, context));
+    app->submit_task(trans->async_send_tcp_segment(frame, context));
 }
 
 void TcpListenSession::collect_expired_accepts(std::vector<std::shared_ptr<TcpConnectSession>>& expired)

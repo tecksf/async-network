@@ -424,9 +424,14 @@ int NetworkController::allocate_fd()
     return fd;
 }
 
-void NetworkController::sumit_task(std::coroutine_handle<> h)
+void NetworkController::submit_task(std::coroutine_handle<> h)
 {
     coro::spawn(h);
+}
+
+void NetworkController::submit_local_task(std::coroutine_handle<> h)
+{
+    spawn_local(h);
 }
 
 link::RetrieveMacAwaiter NetworkController::retrieve_mac_address(const IpAddress& ip)

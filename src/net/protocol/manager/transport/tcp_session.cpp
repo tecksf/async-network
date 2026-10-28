@@ -743,7 +743,7 @@ std::optional<TcpStateTransition> TcpSession::terminate_session(std::errc ec, bo
         auto outbound = allocate_socket_buffer();
         SocketBuffer frame = compose_tcp_segment(outbound, TcpSegment::FLAG_RST | TcpSegment::FLAG_ACK,
                                                  sequence_number, nullptr);
-        app->sumit_task(trans->async_send_tcp_segment(frame, make_context()));
+        app->submit_task(trans->async_send_tcp_segment(frame, make_context()));
     }
     else
     {
@@ -840,7 +840,7 @@ void TcpSession::start_persist_probe()
     }
 
     persist_cancelled = std::make_shared<std::atomic_bool>(false);
-    app->sumit_task(persist_probe_timer(shared_from_this(), persist_cancelled));
+    app->submit_task(persist_probe_timer(shared_from_this(), persist_cancelled));
 }
 
 void TcpSession::stop_persist_probe()
@@ -921,7 +921,7 @@ void TcpSession::send_persist_probe(const SocketBuffer& payload)
     SocketBuffer outbound = compose_tcp_segment(probe, TcpSegment::FLAG_ACK | TcpSegment::FLAG_PSH, target->sequence_number);
     send_window->note_probe_sent(target->sequence_number);
 
-    app->sumit_task(trans->async_send_tcp_segment(outbound, make_context()));
+    app->submit_task(trans->async_send_tcp_segment(outbound, make_context()));
 
     logger->debug("===> TCP session [{0}] zero window probe sent at seq {1}", session_id, target->sequence_number);
 }
@@ -1016,7 +1016,7 @@ void TcpSession::start_time_wait_timer()
 
     auto token = std::make_shared<std::atomic_bool>(false);
     time_wait_cancelled = token;
-    app->sumit_task(time_wait_timer(shared_from_this(), token));
+    app->submit_task(time_wait_timer(shared_from_this(), token));
 }
 
 co_async<> TcpSession::time_wait_timer(std::shared_ptr<TcpSession> session, std::shared_ptr<std::atomic_bool> token)

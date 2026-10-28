@@ -84,7 +84,7 @@ void TcpManager::on_session_closed(std::shared_ptr<TcpSession> session, bool syn
         return;
     }
 
-    app->sumit_task(async_release_session(session));
+    app->submit_task(async_release_session(session));
 }
 
 void TcpManager::release_session(std::shared_ptr<TcpSession> session)
