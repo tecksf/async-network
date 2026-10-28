@@ -103,7 +103,7 @@ void Polling::run(std::stop_token stoken)
     while (not stoken.stop_requested())
     {
         drain_due_timers();
-        implement_ready_tasks();
+        while (implement_ready_tasks());
 
         int submitted = io_uring_submit(ring());
         if (submitted < 0)

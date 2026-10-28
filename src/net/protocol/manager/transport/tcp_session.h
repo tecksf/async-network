@@ -120,7 +120,7 @@ public:
     TcpSession(TcpManager* manager, TcpState s, const SocketAddress& local, const SocketAddress& remote);
     TcpSession(const TcpSession&) = delete;
     TcpSession& operator=(const TcpSession&) = delete;
-    virtual ~TcpSession();
+    ~TcpSession() override;
     bool is_connected() const;
     bool is_closed() const;
     bool is_writable() const;
@@ -140,7 +140,7 @@ public:
     std::optional<MacAddress> get_remote_mac() const;
     LayerContext make_context() const;
 
-    [[nodiscard]] TcpProcessResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx);
+    [[nodiscard]] co_async<TcpProcessResult> process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx);
     void close(std::errc reason = std::errc{});
     std::expected<void, std::errc> shutdown(ShutdownHow how);
     std::expected<int, std::errc> send_user_data(std::span<uint8_t> user_data);
@@ -154,6 +154,7 @@ protected:
     TCP_LOCK_REQUIRED bool switch_to(TcpState next_state);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, const TcpOptionSet& options);
+    TCP_LOCK_REQUIRED co_async<> async_send_tcp_ack(const SocketBuffer payload);
     TCP_LOCK_REQUIRED SocketBuffer compose_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint32_t sequence,
                                                        const TcpOptionSet* options = nullptr);
     TCP_LOCK_REQUIRED void send_window_update();
@@ -172,26 +173,25 @@ protected:
     void on_retransmission_failed() override;
     TCP_LOCK_REQUIRED TcpSocketUser* take_waiter();
     TCP_LOCK_REQUIRED TcpSocketUser* take_write_waiter();
-    TCP_LOCK_REQUIRED std::pair<size_t, bool> read_into(std::span<uint8_t> out);
-    // Returns the waiter once its whole buffer is queued or the write can never finish, null while parked.
-    TCP_LOCK_REQUIRED TcpSocketUser* flush_write_waiter();
+    TCP_LOCK_REQUIRED std::pair<size_t, bool> read_into(std::span<uint8_t> out, bool update_window = false);
+    TCP_LOCK_REQUIRED std::pair<TcpSocketUser*, bool> flush_write_waiter();
 
     std::expected<int, std::errc> send_user_data(const std::vector<SocketBuffer>& payloads);
     TCP_LOCK_REQUIRED std::expected<int, std::errc> send_user_data_locked(std::span<uint8_t> user_data);
     TCP_LOCK_REQUIRED std::errc writability() const;
 
 protected:
-    TcpProcessResult process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_syn_received_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_syn_sent_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_established_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_fin_wait2_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_close_wait_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_closing_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_last_ack_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_time_wait_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpProcessResult process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload);
+    bool process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_syn_received_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_syn_sent_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_established_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_fin_wait2_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_close_wait_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_closing_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_last_ack_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_time_wait_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
+    bool process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload, TcpProcessResult& result);
 
     TCP_LOCK_REQUIRED TcpProcessResult process_tcp_reset(const TcpSegment& header);
     TCP_LOCK_REQUIRED bool verify_reset_sequence(uint32_t seq_num);
@@ -254,7 +254,7 @@ public:
     void add_listen_waiter(TcpSocketUser* user);
     constexpr bool is_listen_session() const override { return true; }
 
-    std::pair<std::shared_ptr<TcpConnectSession>, TcpSocketUser*>
+    co_async<std::pair<std::shared_ptr<TcpConnectSession>, TcpSocketUser*>>
     process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx);
 
 private:
@@ -274,11 +274,11 @@ private:
     uint32_t make_syn_cookie(const SocketAddress& client, std::uint64_t timeslot, std::uint8_t mss_code) const;
     bool verify_syn_cookie(const SocketAddress& client, std::uint32_t cookie, std::uint16_t& peer_mss) const;
     std::uint64_t current_cookie_timeslot() const;
-    void send_syn_ack_without_retransmission(const SocketBuffer& outbound, const LayerContext& ctx, std::uint32_t cookie,
+    co_async<> send_syn_ack_without_retransmission(const SocketBuffer& outbound, const LayerContext& ctx, std::uint32_t cookie,
                                              std::uint32_t client_isn) const;
 
-    void process_syn(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx);
-    void process_syn_cookie(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx) const;
+    co_async<> process_syn(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx);
+    co_async<> process_syn_cookie(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx) const;
     TCP_LOCK_REQUIRED void collect_expired_accepts(std::vector<std::shared_ptr<TcpConnectSession>>& expired);
     TCP_LOCK_REQUIRED void report_dropped(const SocketAddress& client, std::string_view reason);
 

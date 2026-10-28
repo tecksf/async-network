@@ -53,12 +53,12 @@ co_async<> TcpManager::on_tcp_segment_received(const SocketBuffer& inbound, cons
 
     if (auto conn_session = find_connection_session(handle))
     {
-        auto result = conn_session->process_tcp_segment(header, payload, context);
+        TcpProcessResult result = co_await conn_session->process_tcp_segment(header, payload, context);
         dispatch_session_result(conn_session, result);
     }
     else if (auto listen_session = find_listen_session(handle.local))
     {
-        auto [conn_session, waiter] = listen_session->process_tcp_segment(header, payload, context);
+        auto [conn_session, waiter] = co_await listen_session->process_tcp_segment(header, payload, context);
         if (conn_session && waiter)
         {
             add_new_connection_session(conn_session);

@@ -1,4 +1,5 @@
 #include "tcp_receive_window.h"
+#include <algorithm>
 #include <utility>
 
 namespace coro::net::trans {
@@ -44,7 +45,9 @@ bool TcpReceiveWindow::need_window_update(uint32_t threshold) const
         return true;
     }
 
-    return available >= advertised_window_size + threshold;
+    const uint32_t half_window = std::max<uint32_t>(max_window / 2, 1);
+    const uint32_t step = std::clamp<uint32_t>(threshold, 1, half_window);
+    return available >= advertised_window_size + step;
 }
 
 void TcpReceiveWindow::mark_window_advertised()
