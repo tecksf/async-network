@@ -62,43 +62,51 @@ inline const char* get_state_name(TcpState state)
     return TcpStateNames[static_cast<std::size_t>(state)];
 }
 
-struct TcpSessionResult {
-    enum class Kind {
-        None,
-        Connected,
-        Readable,
-        // The pending writer has queued its whole buffer: wake it up.
-        Writable,
-        EndOfStream,
-        // The pending writer can never finish (e.g. the write side was shut down); the session stays alive.
-        Error,
-        Closed,
-    };
+// The session has already written the outcome into every waiter it hands back (data or error), so the
+// receiver only has to wake them up.
+struct TcpProcessResult {
+    static constexpr int ConnectedEvent = 1 << 0;
+    static constexpr int ReadableEvent = 1 << 1;
+    static constexpr int EndOfStreamEvent = 1 << 2;
+    static constexpr int ClosedEvent = 1 << 3;
 
-    bool is_nothing_to_do() const
+    int events = 0;
+    std::errc error = std::errc{};
+    TcpSocketUser* read_waiter = nullptr;
+    TcpSocketUser* write_waiter = nullptr;
+
+    void add_event(int event)
     {
-        return kind == Kind::None || (waiter == nullptr && write_waiter == nullptr);
+        events |= event;
     }
 
-    Kind kind = Kind::None;
-    TcpSocketUser* waiter = nullptr;
-    TcpSocketUser* write_waiter = nullptr;
-    std::errc error = std::errc{};
+    bool has_connected_event() const
+    {
+        return events & ConnectedEvent;
+    }
+
+    bool has_readable_event() const
+    {
+        return events & ReadableEvent;
+    }
+
+    bool has_end_of_stream_event() const
+    {
+        return events & EndOfStreamEvent;
+    }
+
+    bool has_closed_event() const
+    {
+        return events & ClosedEvent;
+    }
 };
 
 // Callers that stopped a session operation halfway and wait for the session to serve them. Either one
-// may be null. A closed session can no longer serve them, so it hands them over together with the
-// reason; waking them is the manager's job.
+// may be null. A closed session can no longer serve them, so it hands them over with the error already
+// set; waking them is the manager's job.
 struct TcpParkedUsers {
     TcpSocketUser* reader = nullptr;
     TcpSocketUser* writer = nullptr;
-    std::errc reason = std::errc{};
-};
-
-struct TcpStateTransition {
-    TcpState prev;
-    TcpState next;
-    std::errc error = std::errc{};
 };
 
 class TcpSessionEvent {
@@ -118,7 +126,6 @@ public:
     bool is_writable() const;
     bool is_readable() const;
     virtual bool is_listen_session() const { return false; }
-    std::pair<size_t, bool> read_into(std::span<uint8_t> out);
     int get_socket_fd() const;
     TcpState get_state() const;
     std::string_view get_string_state() const;
@@ -133,19 +140,18 @@ public:
     std::optional<MacAddress> get_remote_mac() const;
     LayerContext make_context() const;
 
-    [[nodiscard]] TcpSessionResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload,
-                                                      const LayerContext& ctx);
-    std::optional<TcpStateTransition> close(std::errc ec = std::errc{});
+    [[nodiscard]] TcpProcessResult process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx);
+    void close(std::errc reason = std::errc{});
     std::expected<void, std::errc> shutdown(ShutdownHow how);
     std::expected<int, std::errc> send_user_data(std::span<uint8_t> user_data);
-    TcpSessionResult try_to_add_read_waiter(TcpSocketUser* user);
-    TcpSessionResult try_to_add_write_waiter(TcpSocketUser* user);
+    bool try_to_add_read_waiter(TcpSocketUser* user);
+    bool try_to_add_write_waiter(TcpSocketUser* user);
     TcpParkedUsers take_parked_users();
 
 protected:
     [[nodiscard]] SocketBuffer allocate_socket_buffer();
 
-    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> switch_to(TcpState next_state);
+    TCP_LOCK_REQUIRED bool switch_to(TcpState next_state);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, const TcpOptionSet& options);
     TCP_LOCK_REQUIRED SocketBuffer compose_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint32_t sequence,
@@ -158,38 +164,39 @@ protected:
     static co_async<> persist_probe_timer(std::shared_ptr<TcpSession> session,
                                           std::shared_ptr<std::atomic<bool>> cancelled);
     TCP_LOCK_REQUIRED void start_time_wait_timer();
-    TCP_LOCK_REQUIRED TcpSessionResult fill_session_result(const std::optional<TcpStateTransition>& transition);
 
-    void receive_user_data(const TcpSegment& header, const SocketBuffer& payload);
+    bool receive_user_data(const TcpSegment& header, const SocketBuffer& payload);
     void set_peer_mss(uint16_t mss);
     void update_peer_mss(const TcpSegment& header);
     static co_async<> time_wait_timer(std::shared_ptr<TcpSession> session, std::shared_ptr<std::atomic_bool> token);
     void on_retransmission_failed() override;
     TCP_LOCK_REQUIRED TcpSocketUser* take_waiter();
     TCP_LOCK_REQUIRED TcpSocketUser* take_write_waiter();
-    TCP_LOCK_REQUIRED TcpSessionResult flush_write_waiter();
+    TCP_LOCK_REQUIRED std::pair<size_t, bool> read_into(std::span<uint8_t> out);
+    // Returns the waiter once its whole buffer is queued or the write can never finish, null while parked.
+    TCP_LOCK_REQUIRED TcpSocketUser* flush_write_waiter();
 
     std::expected<int, std::errc> send_user_data(const std::vector<SocketBuffer>& payloads);
     TCP_LOCK_REQUIRED std::expected<int, std::errc> send_user_data_locked(std::span<uint8_t> user_data);
     TCP_LOCK_REQUIRED std::errc writability() const;
 
 protected:
-    TcpState process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_syn_received_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_syn_sent_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_established_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_fin_wait2_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_close_wait_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_closing_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_last_ack_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_time_wait_state(const TcpSegment& header, const SocketBuffer& payload);
-    TcpState process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_syn_received_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_syn_sent_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_established_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_fin_wait2_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_close_wait_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_closing_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_last_ack_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_time_wait_state(const TcpSegment& header, const SocketBuffer& payload);
+    TcpProcessResult process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload);
 
-    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> process_tcp_reset(const TcpSegment& header);
+    TCP_LOCK_REQUIRED TcpProcessResult process_tcp_reset(const TcpSegment& header);
     TCP_LOCK_REQUIRED bool verify_reset_sequence(uint32_t seq_num);
-    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> abort_session(std::errc ec);
-    TCP_LOCK_REQUIRED std::optional<TcpStateTransition> terminate_session(std::errc ec, bool send_reset);
+    TCP_LOCK_REQUIRED TcpProcessResult abort_session(std::errc ec);
+    TCP_LOCK_REQUIRED TcpProcessResult terminate_session(std::errc ec, bool send_reset);
 
 protected:
     app::ApplicationService* app;
@@ -232,7 +239,8 @@ public:
     ~TcpConnectSession() override = default;
 
     void restore_syn_cookie_state(std::uint32_t server_isn, std::uint32_t client_isn, std::uint16_t peer_mss);
-    TcpSessionResult try_to_add_connect_waiter(TcpSocketUser* user);
+    // Fills `user` with the outcome of the handshake; returns true only when the waiter was parked.
+    bool try_to_add_connect_waiter(TcpSocketUser* user);
 };
 
 class TcpListenSession : public TcpSession {

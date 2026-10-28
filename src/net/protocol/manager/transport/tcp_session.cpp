@@ -60,9 +60,8 @@ bool TcpSession::is_readable() const
 
 std::pair<size_t, bool> TcpSession::read_into(std::span<uint8_t> out)
 {
-    std::lock_guard lock(session_mutex);
-    size_t count = receive_window.read_into(out);
-    bool eof = read_shutdown or receive_window.is_eof();
+    const size_t count = receive_window.read_into(out);
+    const bool eof = read_shutdown or receive_window.is_eof();
 
     if (count > 0 and is_readable() and receive_window.need_window_update(get_send_mss()))
     {
@@ -72,40 +71,36 @@ std::pair<size_t, bool> TcpSession::read_into(std::span<uint8_t> out)
     return std::pair{count, eof};
 }
 
-TcpSessionResult TcpSession::try_to_add_read_waiter(TcpSocketUser* user)
+bool TcpSession::try_to_add_read_waiter(TcpSocketUser* user)
 {
-    TcpSessionResult result;
     if (user == nullptr)
     {
-        return result;
+        return false;
     }
 
     std::lock_guard lock(session_mutex);
 
-    if (receive_window.has_readable_data())
+    const auto [count, eof] = read_into(user->data);
+    if (count > 0)
     {
-        result.kind = TcpSessionResult::Kind::Readable;
-    }
-    else if (read_shutdown or receive_window.is_eof())
-    {
-        result.kind = TcpSessionResult::Kind::EndOfStream;
-    }
-    else if (is_closed())
-    {
-        result.kind = TcpSessionResult::Kind::Closed;
-        result.error = closed_reason != std::errc{} ? closed_reason : std::errc::not_connected;
+        user->data = user->data.first(count);
+        return false;
     }
 
-    if (result.kind == TcpSessionResult::Kind::None)
+    if (eof)
     {
-        this->waiter = user;
-    }
-    else
-    {
-        result.waiter = user;
+        user->data = user->data.first(0);
+        return false;
     }
 
-    return result;
+    if (is_closed())
+    {
+        user->set_error(closed_reason != std::errc{} ? closed_reason : std::errc::not_connected);
+        return false;
+    }
+
+    waiter = user;
+    return true;
 }
 
 TcpSocketUser* TcpSession::take_waiter()
@@ -115,18 +110,20 @@ TcpSocketUser* TcpSession::take_waiter()
     return w;
 }
 
-TcpSessionResult TcpSession::try_to_add_write_waiter(TcpSocketUser* user)
+bool TcpSession::try_to_add_write_waiter(TcpSocketUser* user)
 {
-    TcpSessionResult result;
     if (user == nullptr)
     {
-        return result;
+        return false;
     }
 
     std::lock_guard lock(session_mutex);
 
     write_waiter = user;
-    return flush_write_waiter();
+
+    // The flush writes the outcome (queued bytes or error) into `user`; the waiter is handed back only when
+    // the whole buffer is queued or the write can never finish.
+    return flush_write_waiter() == nullptr;
 }
 
 TcpSocketUser* TcpSession::take_write_waiter()
@@ -136,20 +133,18 @@ TcpSocketUser* TcpSession::take_write_waiter()
     return w;
 }
 
-TcpSessionResult TcpSession::flush_write_waiter()
+TcpSocketUser* TcpSession::flush_write_waiter()
 {
-    TcpSessionResult result;
     if (write_waiter == nullptr)
     {
-        return result;
+        return nullptr;
     }
 
     if (const std::errc reason = writability(); reason != std::errc{})
     {
-        result.kind = TcpSessionResult::Kind::Error;
-        result.error = reason;
-        result.write_waiter = take_write_waiter();
-        return result;
+        TcpSocketUser* writer = take_write_waiter();
+        writer->set_error(reason);
+        return writer;
     }
 
     while (not write_waiter->data.empty())
@@ -157,35 +152,43 @@ TcpSessionResult TcpSession::flush_write_waiter()
         auto sent = send_user_data_locked(write_waiter->data);
         if (not sent)
         {
-            result.kind = TcpSessionResult::Kind::Error;
-            result.error = sent.error();
-            result.write_waiter = take_write_waiter();
-            return result;
+            TcpSocketUser* writer = take_write_waiter();
+            writer->set_error(sent.error());
+            return writer;
         }
 
         // Nothing was queued: the outbound queue is full, the writer keeps waiting for the next
         // acknowledgement to free some room.
         if (sent.value() == 0)
         {
-            return result;
+            return nullptr;
         }
 
         write_waiter->data = write_waiter->data.subspan(static_cast<size_t>(sent.value()));
     }
 
-    result.kind = TcpSessionResult::Kind::Writable;
-    result.write_waiter = take_write_waiter();
-    return result;
+    return take_write_waiter();
 }
 
 TcpParkedUsers TcpSession::take_parked_users()
 {
     std::lock_guard lock(session_mutex);
 
+    const std::errc reason = closed_reason != std::errc{} ? closed_reason : std::errc::not_connected;
+
     TcpParkedUsers parked;
     parked.reader = take_waiter();
+    if (parked.reader != nullptr)
+    {
+        parked.reader->set_error(reason);
+    }
+
     parked.writer = take_write_waiter();
-    parked.reason = closed_reason != std::errc{} ? closed_reason : std::errc::not_connected;
+    if (parked.writer != nullptr)
+    {
+        parked.writer->set_error(reason);
+    }
+
     return parked;
 }
 
@@ -274,83 +277,123 @@ void TcpSession::update_peer_mss(const TcpSegment& header)
     }
 }
 
-TcpSessionResult TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload,
-                                                const LayerContext& ctx)
+TcpProcessResult TcpSession::process_tcp_segment(const TcpSegment& header, const SocketBuffer& payload, const LayerContext& ctx)
 {
     update_remote_mac(ctx);
 
     std::lock_guard guard(session_mutex);
 
+    TcpProcessResult result;
+
     if (header.is_reset())
     {
-        return fill_session_result(process_tcp_reset(header));
+        result = process_tcp_reset(header);
     }
-
-    if (read_shutdown and payload->size() > 0)
+    else if (read_shutdown and payload->size() > 0)
     {
         logger->warn("===> TCP session [{0}] received {1} byte(s) after the read side was shut down, resetting the connection",
                      session_id, payload->size());
-        return fill_session_result(terminate_session(std::errc::connection_reset, true));
+        result = terminate_session(std::errc::connection_reset, true);
     }
-
-    if (header.is_ack())
+    else
     {
-        send_window->update_peer_window(header.get_window_size(), header.get_sequence_number(), header.get_ack_number());
-        send_window->acknowledge(header.get_ack_number());
-        // The window may have just closed: if data is still queued, start zero-window probing as a fallback
-        start_persist_probe();
+        if (header.is_ack())
+        {
+            send_window->update_peer_window(header.get_window_size(), header.get_sequence_number(), header.get_ack_number());
+            send_window->acknowledge(header.get_ack_number());
+            // The window may have just closed: if data is still queued, start zero-window probing as a fallback
+            start_persist_probe();
+        }
+
+        switch (state.load(std::memory_order_relaxed))
+        {
+            case TcpState::Listen:
+                result = process_tcp_segment_in_listen_state(header, payload);
+                break;
+            case TcpState::SynReceived:
+                result = process_tcp_segment_in_syn_received_state(header, payload);
+                break;
+            case TcpState::SynSent:
+                result = process_tcp_segment_in_syn_sent_state(header, payload);
+                break;
+            case TcpState::Established:
+                result = process_tcp_segment_in_established_state(header, payload);
+                break;
+            case TcpState::FinWait1:
+                result = process_tcp_segment_in_fin_wait1_state(header, payload);
+                break;
+            case TcpState::FinWait2:
+                result = process_tcp_segment_in_fin_wait2_state(header, payload);
+                break;
+            case TcpState::CloseWait:
+                result = process_tcp_segment_in_close_wait_state(header, payload);
+                break;
+            case TcpState::Closing:
+                result = process_tcp_segment_in_closing_state(header, payload);
+                break;
+            case TcpState::LastAck:
+                result = process_tcp_segment_in_last_ack_state(header, payload);
+                break;
+            case TcpState::TimeWait:
+                result = process_tcp_segment_in_time_wait_state(header, payload);
+                break;
+            case TcpState::Closed:
+                result = process_tcp_segment_in_closed_state(header, payload);
+                break;
+            default:
+                logger->error("Unknown TCP State: {}", get_string_state());
+        }
     }
 
-    const TcpState current = state.load(std::memory_order_relaxed);
-    TcpState next_state = current;
-    switch (current)
+    if (result.has_closed_event())
     {
-        case TcpState::Listen:
-            next_state = process_tcp_segment_in_listen_state(header, payload);
-            break;
-        case TcpState::SynReceived:
-            next_state = process_tcp_segment_in_syn_received_state(header, payload);
-            break;
-        case TcpState::SynSent:
-            next_state = process_tcp_segment_in_syn_sent_state(header, payload);
-            break;
-        case TcpState::Established:
-            next_state = process_tcp_segment_in_established_state(header, payload);
-            break;
-        case TcpState::FinWait1:
-            next_state = process_tcp_segment_in_fin_wait1_state(header, payload);
-            break;
-        case TcpState::FinWait2:
-            next_state = process_tcp_segment_in_fin_wait2_state(header, payload);
-            break;
-        case TcpState::CloseWait:
-            next_state = process_tcp_segment_in_close_wait_state(header, payload);
-            break;
-        case TcpState::Closing:
-            next_state = process_tcp_segment_in_closing_state(header, payload);
-            break;
-        case TcpState::LastAck:
-            next_state = process_tcp_segment_in_last_ack_state(header, payload);
-            break;
-        case TcpState::TimeWait:
-            next_state = process_tcp_segment_in_time_wait_state(header, payload);
-            break;
-        case TcpState::Closed:
-            next_state = process_tcp_segment_in_closed_state(header, payload);
-            break;
-        default:
-            logger->error("Unknown TCP State: {}", get_string_state());
+        const std::errc reason = result.error != std::errc{}
+                                     ? result.error
+                                     : (closed_reason != std::errc{} ? closed_reason : std::errc::not_connected);
+
+        result.read_waiter = take_waiter();
+        if (result.read_waiter != nullptr)
+        {
+            result.read_waiter->set_error(reason);
+        }
+
+        result.write_waiter = take_write_waiter();
+        if (result.write_waiter != nullptr)
+        {
+            result.write_waiter->set_error(reason);
+        }
+
+        return result;
     }
 
-    return fill_session_result(switch_to(next_state));
+    if (result.has_readable_event() or result.has_end_of_stream_event())
+    {
+        result.read_waiter = take_waiter();
+        if (result.read_waiter != nullptr)
+        {
+            const size_t count = read_into(result.read_waiter->data).first;
+            result.read_waiter->data = result.read_waiter->data.first(count);
+        }
+    }
+    else if (result.has_connected_event())
+    {
+        result.read_waiter = take_waiter();
+        if (result.read_waiter != nullptr)
+        {
+            result.read_waiter->session = shared_from_this();
+        }
+    }
+
+    result.write_waiter = flush_write_waiter();
+    return result;
 }
 
-std::optional<TcpStateTransition> TcpSession::switch_to(TcpState next_state)
+bool TcpSession::switch_to(TcpState next_state)
 {
     const TcpState prev_state = state.load(std::memory_order_relaxed);
     if (prev_state == next_state)
     {
-        return std::nullopt;
+        return false;
     }
 
     state.store(next_state, std::memory_order_release);
@@ -366,75 +409,16 @@ std::optional<TcpStateTransition> TcpSession::switch_to(TcpState next_state)
         session_events->on_session_closed(shared_from_this());
     }
 
-    return TcpStateTransition{.prev = prev_state, .next = next_state};
+    return true;
 }
 
-TcpSessionResult TcpSession::fill_session_result(const std::optional<TcpStateTransition>& transition)
+TcpProcessResult TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload)
 {
-    TcpSessionResult result;
-
-    if (transition.has_value())
-    {
-        const auto tran = transition.value();
-        if (tran.next == TcpState::Established)
-        {
-            result.kind = TcpSessionResult::Kind::Connected;
-        }
-        else if (tran.next == TcpState::Closed)
-        {
-            result.kind = TcpSessionResult::Kind::Closed;
-            result.error = tran.error;
-        }
-    }
-
-    if (result.kind == TcpSessionResult::Kind::Closed)
-    {
-        result.waiter = take_waiter();
-        result.write_waiter = take_write_waiter();
-        return result;
-    }
-
-    if (result.kind == TcpSessionResult::Kind::None)
-    {
-        if (receive_window.has_readable_data())
-        {
-            result.kind = TcpSessionResult::Kind::Readable;
-        }
-        else if (read_shutdown or receive_window.is_eof())
-        {
-            result.kind = TcpSessionResult::Kind::EndOfStream;
-        }
-    }
-
-    if (result.kind != TcpSessionResult::Kind::None)
-    {
-        result.waiter = take_waiter();
-    }
-
-    const TcpSessionResult flushed = flush_write_waiter();
-    if (flushed.write_waiter != nullptr)
-    {
-        result.write_waiter = flushed.write_waiter;
-        if (result.error == std::errc{})
-        {
-            result.error = flushed.error;
-        }
-
-        if (result.kind == TcpSessionResult::Kind::None)
-        {
-            result.kind = flushed.kind;
-        }
-    }
-
-    return result;
-}
-
-TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& header, const SocketBuffer& payload)
-{
+    TcpProcessResult result;
     if (not(header.contains(TcpSegment::FLAG_SYN) and !header.contains(TcpSegment::FLAG_ACK)))
     {
         logger->warn("{} not sync request, will ignore...", get_string_state());
-        return state;
+        return result;
     }
 
     uint32_t seq = header.get_sequence_number();
@@ -448,21 +432,24 @@ TcpState TcpSession::process_tcp_segment_in_listen_state(const TcpSegment& heade
 
     sequence_number += 1;
 
-    return TcpState::SynReceived;
+    switch_to(TcpState::SynReceived);
+
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_syn_received_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_syn_received_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    TcpProcessResult result;
     if (header.contains(TcpSegment::FLAG_SYN) and not header.contains(TcpSegment::FLAG_ACK))
     {
         logger->debug("===> TCP session [{0}] retransmitted SYN, SYN-ACK is resent by the send window", session_id);
-        return state;
+        return result;
     }
 
     if (not header.contains(TcpSegment::FLAG_ACK))
     {
         logger->warn("{} not ack response, will ignore...", get_string_state());
-        return state;
+        return result;
     }
 
     uint32_t ack = header.get_ack_number();
@@ -470,21 +457,25 @@ TcpState TcpSession::process_tcp_segment_in_syn_received_state(const TcpSegment&
     if (ack != sequence_number || seq != receive_window.get_next_expected_sequence())
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
-        return state;
+        return result;
     }
 
     // The MSS normally travels in the cookie of the stateless handshake, but a client may repeat it in its ACK.
     update_peer_mss(header);
 
-    return TcpState::Established;
+    switch_to(TcpState::Established);
+    result.add_event(TcpProcessResult::ConnectedEvent);
+
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    TcpProcessResult result;
     if (not header.contains(TcpSegment::FLAG_SYN | TcpSegment::FLAG_ACK))
     {
         logger->warn("{} not syn ack response, will ignore...", get_string_state());
-        return state;
+        return result;
     }
 
     uint32_t ack = header.get_ack_number();
@@ -492,7 +483,7 @@ TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& hea
     if (ack != sequence_number)
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
-        return state;
+        return result;
     }
 
     receive_window.set_next_expected_sequence(seq + 1);
@@ -501,11 +492,15 @@ TcpState TcpSession::process_tcp_segment_in_syn_sent_state(const TcpSegment& hea
     SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
     send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
 
-    return TcpState::Established;
+    switch_to(TcpState::Established);
+    result.add_event(TcpProcessResult::ConnectedEvent);
+
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_established_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    TcpProcessResult result;
     uint32_t seq = header.get_sequence_number();
     uint32_t payload_size = payload->size();
     TcpState next_state = state;
@@ -514,7 +509,10 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
     if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
         need_reply = true;
-        receive_user_data(header, payload);
+        if (receive_user_data(header, payload))
+        {
+            result.add_event(TcpProcessResult::ReadableEvent);
+        }
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
@@ -526,6 +524,8 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
     if (receive_window.is_receive_complete())
     {
         next_state = TcpState::CloseWait;
+        // The data of this very segment may still be readable: the reader is woken up for both events.
+        result.add_event(TcpProcessResult::EndOfStreamEvent);
     }
 
     if (need_reply)
@@ -534,11 +534,14 @@ TcpState TcpSession::process_tcp_segment_in_established_state(const TcpSegment& 
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
     }
 
-    return next_state;
+    switch_to(next_state);
+
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    TcpProcessResult result;
     uint32_t ack = header.get_ack_number();
     uint32_t seq = header.get_sequence_number();
     uint32_t payload_size = payload->size();
@@ -546,7 +549,10 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
 
     if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
-        receive_user_data(header, payload);
+        if (receive_user_data(header, payload))
+        {
+            result.add_event(TcpProcessResult::ReadableEvent);
+        }
     }
 
     auto outbound = allocate_socket_buffer();
@@ -574,11 +580,14 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait1_state(const TcpSegment& he
         }
     }
 
-    return next_state;
+    switch_to(next_state);
+
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    TcpProcessResult result;
     uint32_t seq = header.get_sequence_number();
     uint32_t payload_size = payload->size();
     TcpState next_state = state;
@@ -587,7 +596,10 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
     if (header.contains(TcpSegment::FLAG_PSH) || payload_size > 0)
     {
         need_reply = true;
-        receive_user_data(header, payload);
+        if (receive_user_data(header, payload))
+        {
+            result.add_event(TcpProcessResult::ReadableEvent);
+        }
     }
 
     if (header.contains(TcpSegment::FLAG_FIN))
@@ -599,6 +611,7 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
     if (receive_window.is_receive_complete())
     {
         next_state = TcpState::TimeWait;
+        result.add_event(TcpProcessResult::EndOfStreamEvent);
     }
 
     if (need_reply)
@@ -607,45 +620,54 @@ TcpState TcpSession::process_tcp_segment_in_fin_wait2_state(const TcpSegment& he
         send_tcp_segment(outbound, TcpSegment::FLAG_ACK);
     }
 
-    return next_state;
+    switch_to(next_state);
+
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_close_wait_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_close_wait_state(const TcpSegment& header, const SocketBuffer& payload)
 {
-    return state;
+    return {};
 }
 
-TcpState TcpSession::process_tcp_segment_in_closing_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_closing_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    TcpProcessResult result;
     if (not header.contains(TcpSegment::FLAG_ACK))
     {
         logger->warn("{} not ack response, will ignore...", get_string_state());
-        return state;
+        return result;
     }
 
-    return TcpState::TimeWait;
+    switch_to(TcpState::TimeWait);
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_last_ack_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_last_ack_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    TcpProcessResult result;
     if (not header.contains(TcpSegment::FLAG_ACK))
     {
         logger->warn("{} not ack response, will ignore...", get_string_state());
-        return state;
+        return result;
     }
 
     uint32_t ack = header.get_ack_number();
     if (ack != sequence_number)
     {
         logger->warn("{} invalid ack number: {}", get_string_state(), ack);
-        return state;
+        return result;
     }
 
-    return TcpState::Closed;
+    switch_to(TcpState::Closed);
+    result.add_event(TcpProcessResult::ClosedEvent);
+
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_time_wait_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_time_wait_state(const TcpSegment& header, const SocketBuffer& payload)
 {
+    TcpProcessResult result;
     if (header.contains(TcpSegment::FLAG_FIN))
     {
         SocketBuffer outbound = SocketBuffer::reuse_for_outbound(payload);
@@ -653,20 +675,20 @@ TcpState TcpSession::process_tcp_segment_in_time_wait_state(const TcpSegment& he
 
         logger->debug("{} received retransmitted fin, restarting 2MSL timer", get_string_state());
         start_time_wait_timer();
-        return state;
+        return result;
     }
 
     logger->warn("{} waiting for 2MSL timeout, will ignore...", get_string_state());
-    return state;
+    return result;
 }
 
-TcpState TcpSession::process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload)
+TcpProcessResult TcpSession::process_tcp_segment_in_closed_state(const TcpSegment& header, const SocketBuffer& payload)
 {
     logger->warn("{} session already closed, will ignore...", get_string_state());
-    return state;
+    return {};
 }
 
-std::optional<TcpStateTransition> TcpSession::process_tcp_reset(const TcpSegment& header)
+TcpProcessResult TcpSession::process_tcp_reset(const TcpSegment& header)
 {
     const TcpState current = state.load(std::memory_order_relaxed);
 
@@ -705,7 +727,7 @@ std::optional<TcpStateTransition> TcpSession::process_tcp_reset(const TcpSegment
             logger->warn("{} received RST in unexpected state, will ignore...", get_string_state());
     }
 
-    return std::nullopt;
+    return {};
 }
 
 bool TcpSession::verify_reset_sequence(uint32_t seq_num)
@@ -730,13 +752,15 @@ bool TcpSession::verify_reset_sequence(uint32_t seq_num)
     return false;
 }
 
-std::optional<TcpStateTransition> TcpSession::abort_session(std::errc ec)
+TcpProcessResult TcpSession::abort_session(std::errc ec)
 {
     return terminate_session(ec, false);
 }
 
-std::optional<TcpStateTransition> TcpSession::terminate_session(std::errc ec, bool send_reset)
+TcpProcessResult TcpSession::terminate_session(std::errc ec, bool send_reset)
 {
+    TcpProcessResult result;
+
     if (send_reset)
     {
         logger->warn("===> TCP session [{0}] is reset by local side, State: {1} --> Closed", session_id, get_string_state());
@@ -753,14 +777,14 @@ std::optional<TcpStateTransition> TcpSession::terminate_session(std::errc ec, bo
     stop_persist_probe();
     send_window->cancel_transmit();
 
-    auto transition = switch_to(TcpState::Closed);
-    if (transition)
+    if (switch_to(TcpState::Closed))
     {
-        transition->error = ec;
+        result.add_event(TcpProcessResult::ClosedEvent);
+        result.error = ec;
         closed_reason = ec;
     }
 
-    return transition;
+    return result;
 }
 
 SocketBuffer TcpSession::compose_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint32_t sequence,
@@ -1002,9 +1026,9 @@ std::errc TcpSession::writability() const
                : (closed_reason != std::errc{} ? closed_reason : std::errc::not_connected);
 }
 
-void TcpSession::receive_user_data(const TcpSegment& header, const SocketBuffer& payload)
+bool TcpSession::receive_user_data(const TcpSegment& header, const SocketBuffer& payload)
 {
-    receive_window.reassemble(header.get_sequence_number(), payload);
+    return receive_window.reassemble(header.get_sequence_number(), payload);
 }
 
 void TcpSession::start_time_wait_timer()
@@ -1091,7 +1115,7 @@ std::expected<void, std::errc> TcpSession::shutdown(ShutdownHow how)
     return {};
 }
 
-std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
+void TcpSession::close(std::errc reason)
 {
     std::unique_lock mutex(session_mutex);
 
@@ -1116,7 +1140,7 @@ std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
             next_state = TcpState::Closed;
             break;
         case TcpState::Established:
-            if (ec == std::errc{})
+            if (reason == std::errc{})
             {
                 send_fin_segment();
                 next_state = TcpState::FinWait1;
@@ -1140,14 +1164,10 @@ std::optional<TcpStateTransition> TcpSession::close(std::errc ec)
             break;
     }
 
-    std::optional<TcpStateTransition> transition = switch_to(next_state);
-    if (transition and transition->next == TcpState::Closed)
+    if (switch_to(next_state) and next_state == TcpState::Closed)
     {
-        transition->error = ec;
-        closed_reason = ec;
+        closed_reason = reason;
     }
-
-    return transition;
 }
 
 }

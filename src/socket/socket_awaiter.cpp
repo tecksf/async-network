@@ -364,18 +364,7 @@ bool TcpWriteAllAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
         return false;
     }
 
-    const auto result = session->try_to_add_write_waiter(&context);
-    if (result.kind == trans::TcpSessionResult::Kind::None)
-    {
-        return true;
-    }
-
-    if (result.kind != trans::TcpSessionResult::Kind::Writable)
-    {
-        context.set_error(result.error != std::errc{} ? result.error : std::errc::not_connected);
-    }
-
-    return false;
+    return session->try_to_add_write_waiter(&context);
 }
 
 std::expected<std::size_t, std::error_code> TcpWriteAllAwaiter::await_resume() const noexcept
@@ -421,31 +410,7 @@ bool TcpReadAwaiter::await_suspend(std::coroutine_handle<> h) noexcept
         return false;
     }
 
-    while (true)
-    {
-        if (auto [count, eof] = session->read_into(context.data); count > 0)
-        {
-            context.data = context.data.first(count);
-            return false;
-        }
-        else if (eof)
-        {
-            context.data = context.data.first(0);
-            return false;
-        }
-
-        const trans::TcpSessionResult result = session->try_to_add_read_waiter(&context);
-        if (result.kind == trans::TcpSessionResult::Kind::None)
-        {
-            return true;
-        }
-
-        if (result.kind == trans::TcpSessionResult::Kind::Closed)
-        {
-            context.set_error(result.error);
-            return false;
-        }
-    }
+    return session->try_to_add_read_waiter(&context);
 }
 
 std::expected<int, std::error_code> TcpReadAwaiter::await_resume() const noexcept

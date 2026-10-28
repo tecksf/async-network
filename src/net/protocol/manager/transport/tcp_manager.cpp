@@ -121,16 +121,14 @@ void TcpManager::release_session(std::shared_ptr<TcpSession> session)
 
 co_async<> TcpManager::async_release_session(std::shared_ptr<TcpSession> session)
 {
-    const auto [reader, writer, reason] = session->take_parked_users();
+    const auto [reader, writer] = session->take_parked_users();
     if (reader == nullptr and writer == nullptr)
     {
         co_return;
     }
 
-    TcpSessionResult result;
-    result.kind = TcpSessionResult::Kind::Error;
-    result.error = reason;
-    result.waiter = reader;
+    TcpProcessResult result;
+    result.read_waiter = reader;
     result.write_waiter = writer;
     dispatch_session_result(session, result);
 
@@ -138,119 +136,22 @@ co_async<> TcpManager::async_release_session(std::shared_ptr<TcpSession> session
     co_return;
 }
 
-void TcpManager::dispatch_session_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result)
+void TcpManager::dispatch_session_result(std::shared_ptr<TcpSession> session, const TcpProcessResult& result)
 {
-    if (result.kind == TcpSessionResult::Kind::Closed)
+    if (result.has_closed_event())
     {
         on_session_closed(session, true);
     }
 
-    if (result.is_nothing_to_do())
+    if (result.read_waiter != nullptr)
     {
-        return;
+        app->notify_user(result.read_waiter->handle);
     }
 
-    if (result.waiter != nullptr)
-    {
-        bool need_notify = false;
-        if (result.waiter->operation == SocketOperation::Connect)
-        {
-            need_notify = check_connect_waiter_result(session, result);
-        }
-        else if (result.waiter->operation == SocketOperation::Read)
-        {
-            need_notify = check_read_waiter_result(session, result);
-        }
-
-        if (need_notify)
-        {
-            app->notify_user(result.waiter->handle);
-        }
-    }
-
-    // A write waiter is only resumed once the session has queued its whole buffer (or failed to).
-    if (result.write_waiter != nullptr and check_write_waiter_result(result))
+    if (result.write_waiter != nullptr)
     {
         app->notify_user(result.write_waiter->handle);
     }
-}
-
-bool TcpManager::check_connect_waiter_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result)
-{
-    if (result.waiter == nullptr)
-    {
-        return false;
-    }
-
-    assert(result.waiter->operation == SocketOperation::Connect);
-
-    if (result.kind == TcpSessionResult::Kind::Connected)
-    {
-        assert(session->is_connected());
-        result.waiter->session = session;
-        return true;
-    }
-
-    if (result.kind == TcpSessionResult::Kind::Closed or result.kind == TcpSessionResult::Kind::Error)
-    {
-        result.waiter->set_error(result.error != std::errc{} ? result.error : std::errc::not_connected);
-        return true;
-    }
-
-    return false;
-}
-
-bool TcpManager::check_read_waiter_result(std::shared_ptr<TcpSession> session, const TcpSessionResult& result)
-{
-    if (result.waiter == nullptr)
-    {
-        return false;
-    }
-
-    assert(result.waiter->operation == SocketOperation::Read);
-
-    if (result.kind == TcpSessionResult::Kind::Readable || result.kind == TcpSessionResult::Kind::EndOfStream)
-    {
-        auto [count, eof] = session->read_into(result.waiter->data);
-        if (count > 0)
-        {
-            result.waiter->data = result.waiter->data.first(count);
-            return true;
-        }
-
-        if (eof)
-        {
-            result.waiter->data = result.waiter->data.first(0);
-            return true;
-        }
-    }
-
-    if (result.kind == TcpSessionResult::Kind::Closed or result.kind == TcpSessionResult::Kind::Error)
-    {
-        result.waiter->set_error(result.error != std::errc{} ? result.error : std::errc::not_connected);
-        return true;
-    }
-
-    return false;
-}
-
-bool TcpManager::check_write_waiter_result(const TcpSessionResult& result)
-{
-    if (result.write_waiter == nullptr)
-    {
-        return false;
-    }
-
-    assert(result.write_waiter->operation == SocketOperation::Write);
-
-    // The session hands the waiter back only once its whole buffer has been queued, or when the write
-    // can never finish because the connection is gone or the write side was shut down.
-    if (result.kind == TcpSessionResult::Kind::Closed or result.error != std::errc{})
-    {
-        result.write_waiter->set_error(result.error != std::errc{} ? result.error : std::errc::not_connected);
-    }
-
-    return true;
 }
 
 bool TcpManager::bind_socket(TcpSocketUser* user, const SocketAddress& local)
@@ -291,8 +192,7 @@ bool TcpManager::connect_socket(TcpSocketUser* user, const SocketAddress& remote
         conn_session->activate_transmit();
 
         // The SYN-ACK may already have arrived before the waiter was added.
-        auto result = conn_session->try_to_add_connect_waiter(user);
-        return check_connect_waiter_result(conn_session, result);
+        return not conn_session->try_to_add_connect_waiter(user);
     }
 
     user->set_error(std::errc::address_in_use);

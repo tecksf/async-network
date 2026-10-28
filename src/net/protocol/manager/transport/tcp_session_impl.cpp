@@ -116,26 +116,29 @@ void TcpConnectSession::restore_syn_cookie_state(std::uint32_t server_isn, std::
     logger->debug("===> TCP session [{0}] recovered from SYN cookie, MSS: {1}", session_id, get_send_mss());
 }
 
-TcpSessionResult TcpConnectSession::try_to_add_connect_waiter(TcpSocketUser* user)
+bool TcpConnectSession::try_to_add_connect_waiter(TcpSocketUser* user)
 {
-    TcpSessionResult result;
     if (user == nullptr)
     {
-        return result;
+        return false;
     }
 
     std::lock_guard lock(session_mutex);
-    TcpStateTransition transition = {state, state};
-    result = fill_session_result(transition);
-    if (result.kind == TcpSessionResult::Kind::None)
+
+    if (is_connected())
     {
-        this->waiter = user;
+        user->session = shared_from_this();
+        return false;
     }
-    else
+
+    if (is_closed())
     {
-        result.waiter = user;
+        user->set_error(closed_reason != std::errc{} ? closed_reason : std::errc::not_connected);
+        return false;
     }
-    return result;
+
+    waiter = user;
+    return true;
 }
 
 TcpListenSession::TcpListenSession(TcpManager* manager, const SocketAddress& local)
