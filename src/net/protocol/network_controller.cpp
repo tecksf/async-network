@@ -358,28 +358,33 @@ std::coroutine_handle<> NetworkController::make_task_for_socket_packet(int fd)
         frames->deallocate(static_cast<const Block*>(ptr), inbound_cache_slot());
     };
 
-    ++message_count;
-    // logger->debug("packet recv, message_count={}", message_count);
-
     struct sockaddr_ll sll{};
     socklen_t sll_len = sizeof(sll);
 
-    ssize_t n = ::recvfrom(fd, block, config.block_size, MSG_DONTWAIT, reinterpret_cast<struct sockaddr*>(&sll), &sll_len);
+    // MSG_TRUNC makes n the length of the frame on the wire instead of the number of bytes copied,
+    // so a frame that does not fit into one block is detectable instead of silently truncated.
+    ssize_t n = ::recvfrom(fd, block, config.block_size, MSG_DONTWAIT | MSG_TRUNC,
+                           reinterpret_cast<struct sockaddr*>(&sll), &sll_len);
     if (n > 0)
     {
-        // if (sll.sll_pkttype == PACKET_OUTGOING)
-        // {
-        //     return 0;
-        // }
+        if (n > config.block_size)
+        {
+            // Only config.block_size bytes were copied, the rest of the frame is gone: it can not be
+            // decoded. Typically a GRO/GSO super frame (up to 64KiB) carrying several segments.
+            constexpr uint64_t logged_before_rate_limit = 8;
+            constexpr uint64_t log_interval = 1024;
 
-        // n contains the 14 byte ethernet header, ethernet_mtu only the payload.
-        // if (n > config.link.ethernet_mtu + ETHERNET_HEADER_SIZE)
-        // {
-        //     logger->warn("ethernet frame exceeds mtu: frame={} bytes, payload={} bytes, mtu={} bytes",
-        //                  n, n - ETHERNET_HEADER_SIZE, config.link.ethernet_mtu);
-        //     recycle(block);
-        //     return nullptr;
-        // }
+            const uint64_t dropped = truncated_frame_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (dropped <= logged_before_rate_limit or dropped % log_interval == 0)
+            {
+                logger->warn("truncated frame dropped: wire_length={}, buffer={}, dropped={}, "
+                             "check interface offloads (ethtool -K {} gro off lro off)",
+                             n, config.block_size, dropped, get_interface_name());
+            }
+
+            recycle(block);
+            return nullptr;
+        }
 
         SocketBuffer inbound(
             SocketBufferImpl(reinterpret_cast<uint8_t*>(block), config.block_size, n, recycle)

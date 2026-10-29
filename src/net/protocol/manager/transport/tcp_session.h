@@ -154,7 +154,6 @@ protected:
     TCP_LOCK_REQUIRED bool switch_to(TcpState next_state);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag);
     TCP_LOCK_REQUIRED void send_tcp_segment(const SocketBuffer& payload, uint8_t flag, const TcpOptionSet& options);
-    TCP_LOCK_REQUIRED co_async<> async_send_tcp_ack(const SocketBuffer payload);
     TCP_LOCK_REQUIRED SocketBuffer compose_tcp_segment(const SocketBuffer& payload, uint8_t flag, uint32_t sequence,
                                                        const TcpOptionSet* options = nullptr);
     TCP_LOCK_REQUIRED void send_window_update();

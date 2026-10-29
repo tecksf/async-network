@@ -123,7 +123,10 @@ private:
 
     std::atomic<int> fd_counter{0x123};
 
-    long message_count = 0;
+    // Frames whose length on the wire exceeded config.block_size. Only block_size bytes were copied,
+    // so such a frame can not be represented by one pool block and is dropped with a rate limited
+    // warning. A non zero value almost always means GRO/GSO coalesced several segments into one skb.
+    std::atomic<uint64_t> truncated_frame_count{0};
     std::unique_ptr<link::LinkManager> link_manager;
     std::unique_ptr<inet::Ipv4Manager> ipv4_manager;
     std::unique_ptr<trans::UdpManager> udp_manager;

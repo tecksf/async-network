@@ -283,7 +283,7 @@ co_async<TcpProcessResult> TcpSession::process_tcp_segment(const TcpSegment& hea
 {
     update_remote_mac(ctx);
 
-    std::lock_guard guard(session_mutex);
+    std::unique_lock guard(session_mutex);
 
     TcpProcessResult result;
     bool need_reply = false;
@@ -393,7 +393,10 @@ co_async<TcpProcessResult> TcpSession::process_tcp_segment(const TcpSegment& hea
     if (need_reply and not queued and not is_closed())
     {
         auto outbound = allocate_socket_buffer();
-        co_await async_send_tcp_ack(outbound);
+        outbound = compose_tcp_segment(outbound, TcpSegment::FLAG_ACK, sequence_number, nullptr);
+
+        guard.unlock();
+        co_await trans->async_send_tcp_segment(outbound, make_context());
     }
 
     co_return result;
@@ -807,15 +810,6 @@ SocketBuffer TcpSession::compose_tcp_segment(const SocketBuffer& payload, uint8_
     segment.seal(fake_header, outbound);
 
     return outbound;
-}
-
-co_async<> TcpSession::async_send_tcp_ack(const SocketBuffer payload)
-{
-    TcpOptionSet options{};
-    SocketBuffer outbound = compose_tcp_segment(payload, TcpSegment::FLAG_ACK, sequence_number, &options);
-
-    co_await trans->async_send_tcp_segment(outbound, make_context());
-    co_return;
 }
 
 void TcpSession::send_tcp_segment(const SocketBuffer& payload, uint8_t flag)
