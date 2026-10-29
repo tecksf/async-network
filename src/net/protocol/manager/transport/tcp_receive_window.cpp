@@ -1,5 +1,6 @@
 #include "tcp_receive_window.h"
 #include <algorithm>
+#include <cassert>
 #include <utility>
 
 namespace coro::net::trans {
@@ -29,6 +30,7 @@ uint32_t TcpReceiveWindow::get_next_expected_sequence() const
 
 uint16_t TcpReceiveWindow::available_window() const
 {
+    assert(used_bytes <= max_window);
     return static_cast<uint16_t>(max_window - used_bytes);
 }
 
@@ -164,15 +166,38 @@ bool TcpReceiveWindow::reassemble(uint32_t seq_number, const SocketBuffer& paylo
         seq_number = next_expected_sequence;
     }
 
-    if (used_bytes + segment_payload->size() > max_window)
+    const uint32_t payload_size = segment_payload->size();
+    uint32_t keep = std::min<uint32_t>(payload_size, max_window > used_bytes ? max_window - used_bytes : 0);
+
+    const auto overlap = std::ranges::find_if(buffer, [seq_number](const Segment& segment) {
+        return segment.sequence_number + segment.payload->size() > seq_number;
+    });
+    if (overlap != buffer.end())
+    {
+        if (overlap->sequence_number <= seq_number)
+        {
+            return false;
+        }
+
+        keep = std::min<uint32_t>(keep, overlap->sequence_number - seq_number);
+    }
+
+    if (keep == 0)
     {
         return false;
     }
 
+    if (keep < payload_size)
+    {
+        segment_payload->consume(payload_size - keep, Dir::Forward);
+    }
+
     const uint32_t before = next_expected_sequence;
 
-    buffer.insert(Segment{seq_number, segment_payload});
-    used_bytes += segment_payload->size();
+    if (buffer.insert(Segment{seq_number, segment_payload}).second)
+    {
+        used_bytes += keep;
+    }
 
     advance_next_expected_sequence();
 
